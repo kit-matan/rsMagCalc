@@ -53,4 +53,19 @@ per platform, importable from every CPython ≥ 3.9. Wheels are built without
 
 M0: scaffold. `build_info()` / `describe()` for provenance, and one kernel,
 `classical_energy(H, b, m)`, that proves the zero-copy NumPy contract and is pinned
-to `magcalc.classical_dynamics.energy`. Kernels K1–K6 follow the plan.
+to `magcalc.classical_dynamics.energy`.
+
+M1 (K1, `src/classical.rs`): the classical Metropolis sweep (`sweep`, uniform and
+flip proposals, in place on a `Rng` stream), the whole replica-exchange loop
+(`parallel_tempering`, rayon over replicas), the Wang–Landau move loop
+(`wang_landau`), the Landau–Lifshitz integrators (`evolve`: rk4 with per-step
+renormalization, implicit midpoint without), the Heun Langevin thermostat
+(`langevin`) and `sampled_trajectories` (rayon over trajectories; trajectory i owns
+the PCG64 stream (seed, i), so chunked calls reproduce one call and no result
+depends on the thread count). Dense H (3N×3N) for now; `g = H m + b` is the energy
+GRADIENT, as pyMagCalc's `local_field` returns it. Pinned in
+`tests/test_classical_parity.py`: `evolve` matches `magcalc.classical_dynamics.evolve`
+to 1e-12 (measured 2e-16) over 50 rk4 and 50 midpoint steps, the single-move dE
+equals E(after) − E(before) to 1e-12, plus the exact classical-dimer thermodynamics
+and the Langevin function. pyMagCalc selects it with `calculation: {kernels: rust}`
+and runs its own oracle tests under both kernel sets. K2–K6 follow the plan.
