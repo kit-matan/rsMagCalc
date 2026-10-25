@@ -20,6 +20,10 @@ pyo3 = { version = "0.30", features = ["abi3-py39"] }
 numpy = "0.30"
 ndarray = "0.17"
 num-complex = "0.4"
+rayon = "1"
+rand = "0.9"
+rand_pcg = "0.9"
+rand_distr = "0.5"
 
 [profile.release]
 opt-level = 3
