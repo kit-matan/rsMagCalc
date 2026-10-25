@@ -20,6 +20,15 @@ fn main() {
         "cargo:rustc-env=RSMAGCALC_TARGET={}",
         std::env::var("TARGET").unwrap_or_default()
     );
+    // Re-run on a new commit, not only on a branch switch: `.git/HEAD` holds
+    // `ref: refs/heads/<branch>` and does not change when that branch advances,
+    // so watch the ref file it points at as well (and packed-refs, where a gc'd
+    // ref lives instead). Without this the baked head goes stale one commit in.
     println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/refs");
+    if let Ok(head) = std::fs::read_to_string(".git/HEAD") {
+        if let Some(r) = head.trim().strip_prefix("ref: ") {
+            println!("cargo:rerun-if-changed=.git/{r}");
+        }
+    }
+    println!("cargo:rerun-if-changed=.git/packed-refs");
 }
