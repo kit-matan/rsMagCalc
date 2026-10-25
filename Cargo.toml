@@ -25,6 +25,14 @@ num-complex = "0.4"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
+# NEVER strip (cargo's release default is strip = "debuginfo"). On macOS 27.0.1
+# with Xcode 27.1 (ld-27037.1) every strip pass -- rustc's, maturin's --strip,
+# and Apple's own `strip -x` -- leaves the LINKEDIT string pool at an offset
+# that is 4 mod 8 whenever the indirect symbol table has an odd length, and the
+# macOS 27 dyld refuses to load it ("mis-aligned LINKEDIT string pool"). The
+# unstripped link is correctly padded by ld. Measured 2026-10-26; pyproject.toml
+# carries the matching `strip = false` for maturin. Cost: ~0.5 MB of symbols.
+strip = "none"
 # No `-C target-cpu=native` here: wheels must not be tied to the build host
 # (the same rule fMagCalc enforces with FMAGCALC_PORTABLE). Set RUSTFLAGS for a
 # local build if you want it.

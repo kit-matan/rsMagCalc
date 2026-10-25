@@ -10,7 +10,7 @@ import rsmagcalc
 def test_compiled_core_is_present():
     assert rsmagcalc.backend == "pyo3", (
         "rsmagcalc imported without its compiled core; build it with "
-        "`maturin develop --release` in rsMagCalc/."
+        "`pip install -e . --no-build-isolation` in rsMagCalc/."
     )
 
 

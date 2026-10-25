@@ -24,10 +24,26 @@ The contract is fMagCalc's:
 ```bash
 cd rsMagCalc
 pip install maturin
-maturin develop --release        # builds rsmagcalc._core into the active interpreter
+pip install -e . --no-build-isolation   # compiles rsmagcalc._core; editable, like pyMagCalc
 python -c "import rsmagcalc; print(rsmagcalc.backend, rsmagcalc.describe())"
-pytest                           # parity against pyMagCalc, which must be installed
+pytest                                  # parity against pyMagCalc, which must be installed
 ```
+
+`maturin develop --release` does the same but only inside a virtualenv or conda
+environment (it refuses a bare pyenv interpreter); the pip form works anywhere.
+Rebuild after editing `src/` with the same `pip install -e .` command -- an editable
+install makes the Python sources live, not the compiled core.
+
+**Do not strip the extension, and do not pass `--strip` to maturin.** On macOS 27
+(Xcode 27.1, ld-27037.1) every strip pass -- cargo's default `strip = "debuginfo"`,
+maturin's `--strip`, Apple's `strip -x` -- leaves the LINKEDIT string pool 4 bytes off
+an 8-byte boundary whenever the indirect symbol table has an odd length, and the new
+dyld refuses the file with `mis-aligned LINKEDIT string pool`. The symptom is
+`rsmagcalc.backend == None` after a build that reported success. `Cargo.toml` sets
+`strip = "none"` and `pyproject.toml` sets `strip = false` for this reason (measured
+2026-10-26); `rust-lld` is not an alternative here, it cannot read the SDK's `.tbd`
+stubs. If a wheel built elsewhere fails to import on macOS 27, check
+`otool -l _core.abi3.so | grep stroff` against a multiple of 8 before anything else.
 
 `maturin build --release` produces a wheel. abi3 (`pyo3/abi3-py39`) means one wheel
 per platform, importable from every CPython ≥ 3.9. Wheels are built without

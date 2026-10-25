@@ -51,8 +51,8 @@ def classical_energy(H, b, m) -> float:
     """E = 1/2 m^T H m + b^T m, pyMagCalc `classical_dynamics.energy` in Rust."""
     if _core is None:
         raise RuntimeError(
-            "rsmagcalc's compiled core is not built; run `maturin develop --release` "
-            "in rsMagCalc/ or `pip install /path/to/rsMagCalc`."
+            "rsmagcalc's compiled core is not built; run `pip install -e . "
+            "--no-build-isolation` in rsMagCalc/ or `pip install /path/to/rsMagCalc`."
         )
     import numpy as np
 

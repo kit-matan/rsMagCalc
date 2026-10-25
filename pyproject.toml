@@ -25,6 +25,9 @@ dev = ["pytest>=7.0", "pytest-xdist>=3.0"]
 python-source = "python"
 module-name = "rsmagcalc._core"
 features = ["pyo3/extension-module"]
+# maturin's PEP 517 build defaults to `--release --strip`; the strip pass breaks the
+# extension on macOS 27 (see the comment on [profile.release] in Cargo.toml).
+strip = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
