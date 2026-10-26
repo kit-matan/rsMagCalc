@@ -6,8 +6,10 @@
 //! Metropolis sweep, parallel tempering, Wang-Landau, the Landau-Lifshitz
 //! integrators and the Langevin thermostat). M2: `cpn` (K2, the CP^(N-1)
 //! Metropolis sampler, RK4 integrator and damped quench for SU(N) coherent
-//! states). The remaining kernels (SU(N) LSWT, KPM, SCGA) follow the order in
-//! ../RUST_KERNELS_PLAN.md.
+//! states). M3: `sun_lswt` (K3, the SU(N) LSWT H(q) assembly, Colpa
+//! diagonalization, one-magnon correlations and the shifted-Cholesky guard, on
+//! the platform LAPACK through `lapack`). The remaining kernels (KPM, SCGA)
+//! follow the order in ../RUST_KERNELS_PLAN.md.
 //!
 //! Conventions shared with the Python side, and never to be re-derived here:
 //!   * the classical energy is E = 1/2 m^T H m + b^T m with H the (3N x 3N)
@@ -15,6 +17,8 @@
 //!   * m is (N, 3) row-major, flattened exactly as NumPy's `ravel()` does.
 mod classical;
 mod cpn;
+mod lapack;
+mod sun_lswt;
 
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
@@ -85,5 +89,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(classical_energy, m)?)?;
     classical::register(m)?;
     cpn::register(m)?;
+    sun_lswt::register(m)?;
     Ok(())
 }

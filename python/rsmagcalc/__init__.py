@@ -15,7 +15,8 @@ from __future__ import annotations
 __version__ = "0.1.0"
 __all__ = ["backend", "build_info", "describe", "classical_energy",
            "Rng", "move_energy_change", "sweep", "parallel_tempering", "evolve",
-           "langevin", "wang_landau", "sampled_trajectories", "CpnModel"]
+           "langevin", "wang_landau", "sampled_trajectories", "CpnModel",
+           "SunModel", "NotPositiveDefinite"]
 
 try:
     from . import _core
@@ -374,3 +375,134 @@ class CpnModel:
             z0, float(kT), int(traj_start), int(n_traj), int(therm_sweeps), float(sigma),
             bool(adapt), float(target), float(dt), int(n_steps), int(record_every),
             int(seed), None if n_workers is None else int(n_workers))
+
+
+# --------------------------------------------------------------------------
+# K3 -- SU(N) LSWT: H(q) assembly, Colpa diagonalization, one-magnon
+# correlations, general eigenvalues, the shifted-Cholesky guard (M3)
+# --------------------------------------------------------------------------
+#
+# Mirrors pyMagCalc `sun/lswt.py` (`SUNModel.hamiltonian`, `_bogoliubov`,
+# `structure_factor` up to the cross-section contraction, `dispersion` /
+# `max_imaginary` through `eigenvalues`, and `is_stable_at`) and is pinned to it in
+# tests/test_sun_lswt_parity.py. A `SunModel` packs the reference-state tables
+# `SUNModel._prepare` built (t, tb, Q, QA, s0 -- ragged per site, so mixed spin
+# is fine) and the bond list once; every method then runs a q BATCH in parallel.
+
+class NotPositiveDefinite(ValueError):
+    """Raised by `SunModel.bogoliubov` / `correlations` when H2(q) is not positive
+    definite at some q (the reference state is not a minimum). pyMagCalc turns it
+    into the same `numpy.linalg.LinAlgError` its NumPy path raises."""
+
+
+if _core is not None:  # the Rust exception IS this one, so `except` works either way
+    NotPositiveDefinite = _core.NotPositiveDefinite  # noqa: F811
+
+
+class SunModel:
+    """A pyMagCalc `SUNModel`'s reference-state tables, packed for the LSWT kernels.
+
+    Arguments are the `SUNModel` attributes of the same names: `Ms` (bosons per
+    site), `s0` (L, n_ops), `t` / `tb` (per site (n_ops, M_i)), `Q` (per site
+    (n_ops, M_i, M_i)), `QA` (per site (M_i, M_i)), `bonds` as `(i, j, dr_cart, J)`
+    with J (n_ops, n_ops) REAL and both directions listed, `moment_terms` (per site a
+    list of `(d_k, (ix, iy, iz))`), `n_cells`.
+    """
+
+    __slots__ = ("_m", "L", "D", "n_ops", "Ms")
+
+    def __init__(self, Ms, s0, t, tb, Q, QA, bonds, moment_terms, n_cells=1, n_ops=None):
+        import numpy as np
+
+        _need_core()
+        Ms = [int(m) for m in Ms]
+        L = len(Ms)
+        if L == 0:
+            raise ValueError("SunModel needs at least one site")
+        s0 = np.ascontiguousarray(s0, dtype=np.complex128)
+        if n_ops is None:
+            n_ops = int(s0.shape[1])
+        if s0.shape != (L, n_ops):
+            raise ValueError(f"s0 must be ({L}, {n_ops}), got {s0.shape}")
+
+        def _cat(parts, shapes, name):
+            flat = []
+            for i, (p, shp) in enumerate(zip(parts, shapes)):
+                a = np.asarray(p, dtype=np.complex128)
+                if a.shape != shp:
+                    raise ValueError(f"{name}[{i}] must be {shp}, got {a.shape}")
+                flat.append(a.ravel())
+            return np.ascontiguousarray(np.concatenate(flat)) if flat \
+                else np.zeros(0, dtype=np.complex128)
+
+        t_flat = _cat(t, [(n_ops, m) for m in Ms], "t")
+        tb_flat = _cat(tb, [(n_ops, m) for m in Ms], "tb")
+        q_flat = _cat(Q, [(n_ops, m, m) for m in Ms], "Q")
+        qa_flat = _cat(QA, [(m, m) for m in Ms], "QA")
+
+        bonds = list(bonds)
+        nb = len(bonds)
+        bi = np.array([int(b[0]) for b in bonds], dtype=np.int64)
+        bj = np.array([int(b[1]) for b in bonds], dtype=np.int64)
+        dr = np.zeros((nb, 3), dtype=np.float64)
+        J = np.zeros((nb, n_ops, n_ops), dtype=np.float64)
+        for k, (i, j, d, jm) in enumerate(bonds):
+            dr[k] = np.asarray(d, dtype=np.float64).reshape(3)
+            jm = np.asarray(jm)
+            if jm.shape != (n_ops, n_ops):
+                raise ValueError(f"bond {k}: J must be ({n_ops}, {n_ops}), got {jm.shape}")
+            if np.iscomplexobj(jm) and np.any(jm.imag):
+                raise ValueError(f"bond {k}: J must be real (SUNModel stores real J)")
+            J[k] = jm.real
+        mt_site, mt_d, mt_idx = [], [], []
+        for i, terms in enumerate(moment_terms):
+            for (d, idx) in terms:
+                mt_site.append(i)
+                mt_d.append(np.asarray(d, dtype=np.float64).reshape(3))
+                mt_idx.append([int(x) for x in idx])
+        mt_site = np.asarray(mt_site, dtype=np.int64)
+        mt_d = (np.asarray(mt_d, dtype=np.float64).reshape(-1, 3) if mt_site.size
+                else np.zeros((0, 3)))
+        mt_idx = (np.asarray(mt_idx, dtype=np.int64).reshape(-1, 3) if mt_site.size
+                  else np.zeros((0, 3), dtype=np.int64))
+        self._m = _core.SunModel(
+            np.asarray(Ms, dtype=np.int64), int(n_ops), s0.ravel(), t_flat, tb_flat,
+            q_flat, qa_flat, bi, bj, np.ascontiguousarray(dr), np.ascontiguousarray(J),
+            mt_site, np.ascontiguousarray(mt_d), np.ascontiguousarray(mt_idx),
+            float(n_cells))
+        self.L, self.D, self.n_ops, self.Ms = L, int(self._m.d), int(n_ops), Ms
+
+    @staticmethod
+    def _qs(qs):
+        import numpy as np
+
+        return np.ascontiguousarray(np.asarray(qs, dtype=np.float64).reshape(-1, 3))
+
+    def hamiltonians(self, qs, n_workers=None):
+        """g H2(q) per q: (nq, 2D, 2D) complex (`SUNModel.hamiltonian`)."""
+        return self._m.hamiltonians(self._qs(qs), n_workers)
+
+    def eigenvalues(self, qs, n_workers=None):
+        """All 2D eigenvalues of g H2(q) per q, unsorted: (nq, 2D) complex."""
+        return self._m.eigenvalues(self._qs(qs), n_workers)
+
+    def bogoliubov(self, qs, n_workers=None):
+        """Colpa per q: (omega (nq, D) descending, T (nq, 2D, 2D)) as
+        `SUNModel._bogoliubov` returns them. Raises NotPositiveDefinite."""
+        om, tt = self._m.bogoliubov(self._qs(qs), n_workers)
+        return om, tt.transpose(0, 2, 1)
+
+    def correlations(self, qs, n_workers=None):
+        """(omega (nq, D), S^{ab}_nu (nq, 3, 3, D)): the per-band one-magnon
+        correlation tensors of `SUNModel.structure_factor`, before the
+        cross-section contraction and the form factor."""
+        return self._m.correlations(self._qs(qs), n_workers)
+
+    def stable(self, qs, shift, n_workers=None):
+        """Per q: is H2(q) + shift I positive definite (`SUNModel.is_stable_at`)?"""
+        import numpy as np
+
+        return np.asarray(self._m.stable(self._qs(qs), float(shift), n_workers), dtype=bool)
+
+    def __repr__(self):
+        return repr(self._m)
