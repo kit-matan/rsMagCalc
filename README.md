@@ -84,4 +84,25 @@ Pinned in `tests/test_cpn_parity.py`: that dE equals E(after) − E(before) to 1
 on plain SU(3), biquadratic (12-wide operator set), mixed-spin and self-bonded
 cells; `h_i|Z_i>` against the `local_field` definition; `evolve` and `quench`
 against `magcalc.sun.dynamics` to 1e-12 over 50 steps; the sampler against the
-closed-form partition function of a decoupled site. K3–K6 follow the plan.
+closed-form partition function of a decoupled site.
+
+M3 (K3, `src/sun_lswt.rs`, `rsmagcalc.SunModel`): SU(N) linear spin-wave theory.
+A `SUNModel`'s reference-state tables (`t`, `tb`, `Q`, `QA`, `s0`, ragged per site
+so mixed spin works) and its bond list are packed once; every method then runs a
+q BATCH in parallel (rayon): `hamiltonians` (g H2, the per-q assembly that is a
+Python loop over bonds × n_ops² in pyMagCalc), `eigenvalues` (the general problem
+`dispersion` / `max_imaginary` reduce), `bogoliubov` (Colpa with the explicit
+[D positive descending, D negative] order), `correlations` (the per-band one-magnon
+tensors conj(M^a) M^b / n_cells, before the cross-section contraction, which stays
+in NumPy) and `stable` (the ground-state guard: one shifted Cholesky, the shift
+supplied by pyMagCalc from its q-INDEPENDENT reference scale). The linear algebra
+is the platform LAPACK (`src/lapack.rs`: Accelerate's ILP64 interface on macOS,
+linked with `-framework Accelerate`), not faer: inside a degenerate eigenspace only
+the same eigensolver reproduces NumPy's per-band split, which keeps band-by-band
+oracle tests meaningful under both kernels. Linux links the system `lapack`/`blas`
+(LP64) and is untested. Pinned in `tests/test_sun_lswt_parity.py` (37 tests): H(q)
+elementwise to 1e-13, energies and per-band tensors to 1e-10, T para-unitary and
+equal to NumPy's columns up to phase, the guard verdict by verdict on pyMagCalc's
+`test_kpm_stability` fixtures, mixed spin, the biquadratic operator set, a
+non-collinear and a disordered supercell, and the entangled dimer chain.
+K4–K6 follow the plan.
