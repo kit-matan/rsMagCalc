@@ -512,6 +512,15 @@ impl PyRng {
         self.inner.random::<u64>()
     }
 
+    /// A random permutation of 0..n (Generator.permutation), so a NumPy loop
+    /// handed this stream as its `rng` -- the fallback after a kernel failure --
+    /// still runs.
+    fn permutation<'py>(&mut self, py: Python<'py>, n: usize) -> Bound<'py, PyArray1<i64>> {
+        let mut v: Vec<i64> = (0..n as i64).collect();
+        v.shuffle(&mut self.inner);
+        v.into_pyarray(py)
+    }
+
     fn __repr__(&self) -> String {
         format!("rsmagcalc.Rng(seed={})", self.seed)
     }

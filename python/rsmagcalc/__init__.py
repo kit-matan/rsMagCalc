@@ -135,6 +135,9 @@ class Rng:
     def next_u64(self):
         return int(self._r.next_u64())
 
+    def permutation(self, n):
+        return self._r.permutation(int(n))
+
     def __repr__(self):
         return repr(self._r)
 
