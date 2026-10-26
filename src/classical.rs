@@ -175,7 +175,7 @@ fn sweep_impl(
 }
 
 /// Mix (seed, index) into an independent PCG64 stream (splitmix64 finalizer).
-fn stream(seed: u64, index: u64) -> Pcg64 {
+pub(crate) fn stream(seed: u64, index: u64) -> Pcg64 {
     let mut z = seed.wrapping_add((index + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -183,7 +183,7 @@ fn stream(seed: u64, index: u64) -> Pcg64 {
 }
 
 /// Run `f` inside a rayon pool of `n_workers` threads (None/0 = the global pool).
-fn with_pool<T: Send>(n_workers: Option<usize>, f: impl FnOnce() -> T + Send) -> PyResult<T> {
+pub(crate) fn with_pool<T: Send>(n_workers: Option<usize>, f: impl FnOnce() -> T + Send) -> PyResult<T> {
     match n_workers {
         Some(n) if n > 0 => {
             let pool = rayon::ThreadPoolBuilder::new()
@@ -477,7 +477,7 @@ fn check_m(shape: &[usize], n: usize, name: &str) -> PyResult<()> {
 /// after sweep) continue one stream, as its NumPy loops do with a Generator.
 #[pyclass(name = "Rng", module = "rsmagcalc._core")]
 pub struct PyRng {
-    inner: Pcg64,
+    pub(crate) inner: Pcg64,
     seed: u64,
 }
 

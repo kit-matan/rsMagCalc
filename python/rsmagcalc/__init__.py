@@ -15,7 +15,7 @@ from __future__ import annotations
 __version__ = "0.1.0"
 __all__ = ["backend", "build_info", "describe", "classical_energy",
            "Rng", "move_energy_change", "sweep", "parallel_tempering", "evolve",
-           "langevin", "wang_landau", "sampled_trajectories"]
+           "langevin", "wang_landau", "sampled_trajectories", "CpnModel"]
 
 try:
     from . import _core
@@ -227,3 +227,147 @@ def sampled_trajectories(H, b, S, kT, traj_start, n_traj, therm_sweeps, dt, n_st
         H, b, _spins(S, n), float(kT), int(traj_start), int(n_traj), int(therm_sweeps),
         float(dt), int(n_steps), int(record_every), str(integrator), int(seed),
         None if n_workers is None else int(n_workers))
+
+
+# --------------------------------------------------------------------------
+# K2 -- CP^(N-1) Metropolis sampler, RK4 integrator and damped quench (M2)
+# --------------------------------------------------------------------------
+#
+# Mirrors pyMagCalc `sun/dynamics.py` and is pinned to it in
+# tests/test_cpn_parity.py. A `CpnModel` packs a `SUNModel`'s static data once
+# (per-site N_i, operator tables, on-site matrices, bond list -- ragged, so a
+# mixed-spin cell is fine); states travel as ONE packed complex vector of
+# sum_i N_i entries (`pack` / `unpack`), which is what keeps a 1600-site quench
+# from paying a Python object per site per step.
+
+class CpnModel:
+    """A pyMagCalc `SUNModel`'s static data, packed for the CP^(N-1) kernels.
+
+    `Ns`: N_i per site; `ops[i][p]`: the N_i x N_i local operators (the same
+    count n_ops on every site); `onsite`: `(i, A_i)` pairs (summed per site);
+    `bonds`: `(i, j, J)` with J n_ops x n_ops, BOTH directions listed, as in
+    `SUNModel.bonds` (the `dr` entry is not needed and not taken).
+    """
+
+    __slots__ = ("_m", "Ns", "L", "n_ops", "offsets", "uniform")
+
+    def __init__(self, Ns, ops, onsite, bonds):
+        import numpy as np
+
+        _need_core()
+        Ns = [int(n) for n in Ns]
+        L = len(Ns)
+        if L == 0:
+            raise ValueError("CpnModel needs at least one site")
+        n_ops = len(ops[0])
+        if any(len(ol) != n_ops for ol in ops):
+            raise ValueError("every site must expose the same number of operators")
+        ops_flat = []
+        for i in range(L):
+            for p in range(n_ops):
+                o = np.asarray(ops[i][p], dtype=np.complex128)
+                if o.shape != (Ns[i], Ns[i]):
+                    raise ValueError(f"ops[{i}][{p}] must be ({Ns[i]}, {Ns[i]}), "
+                                     f"got {o.shape}")
+                ops_flat.append(o.ravel())
+        A = [np.zeros((n, n), dtype=np.complex128) for n in Ns]
+        for (k, Amat) in onsite:
+            Amat = np.asarray(Amat, dtype=np.complex128)
+            if Amat.shape != (Ns[k], Ns[k]):
+                raise ValueError(f"onsite[{k}] must be ({Ns[k]}, {Ns[k]}), "
+                                 f"got {Amat.shape}")
+            A[int(k)] += Amat
+        bonds = list(bonds)
+        bi = np.array([int(b[0]) for b in bonds], dtype=np.int64)
+        bj = np.array([int(b[1]) for b in bonds], dtype=np.int64)
+        if bonds:
+            J = np.array([np.asarray(b[-1], dtype=np.complex128) for b in bonds])
+            if J.shape != (len(bonds), n_ops, n_ops):
+                raise ValueError(f"every bond J must be ({n_ops}, {n_ops}); got "
+                                 f"stacked shape {J.shape}")
+            J = J.ravel()
+        else:
+            J = np.zeros(0, dtype=np.complex128)
+        self._m = _core.CpnModel(
+            np.asarray(Ns, dtype=np.int64), int(n_ops),
+            np.ascontiguousarray(np.concatenate(ops_flat)),
+            np.ascontiguousarray(np.concatenate([a.ravel() for a in A])),
+            bi, bj, np.ascontiguousarray(J))
+        self.Ns, self.L, self.n_ops = Ns, L, n_ops
+        self.offsets = np.asarray(self._m.offsets)
+        self.uniform = len(set(Ns)) == 1
+
+    # -- state packing ------------------------------------------------------
+    def pack(self, Z):
+        """A list of per-site states (or an (L, N) array) -> one complex vector."""
+        import numpy as np
+
+        if self.uniform and isinstance(Z, np.ndarray) and Z.shape == (self.L, self.Ns[0]):
+            return np.ascontiguousarray(Z, dtype=np.complex128).ravel()
+        out = np.empty(int(self.offsets[-1]), dtype=np.complex128)
+        for i in range(self.L):
+            z = np.asarray(Z[i], dtype=np.complex128).reshape(-1)
+            if z.size != self.Ns[i]:
+                raise ValueError(f"Z[{i}] must have {self.Ns[i]} entries, got {z.size}")
+            out[self.offsets[i]:self.offsets[i + 1]] = z
+        return out
+
+    def unpack(self, flat):
+        """One packed vector -> a list of per-site arrays (views, not copies)."""
+        import numpy as np
+
+        flat = np.asarray(flat)
+        if self.uniform:
+            return list(flat.reshape(self.L, self.Ns[0]))
+        return [flat[self.offsets[i]:self.offsets[i + 1]] for i in range(self.L)]
+
+    # -- kernels --------------------------------------------------------------
+    def energy(self, Z):
+        return self._m.energy(self.pack(Z))
+
+    def move_energy_change(self, Z, i, cand):
+        """dE of replacing Z[i] by `cand`, from the bonds touching i only."""
+        import numpy as np
+
+        return self._m.move_energy_change(self.pack(Z), int(i),
+                                          np.ascontiguousarray(cand, dtype=np.complex128))
+
+    def h_times_z(self, Z):
+        """h_i |Z_i> for every site (pyMagCalc `_h_times_z`), as a list."""
+        return self.unpack(self._m.h_times_z(self.pack(Z)))
+
+    def thermalize(self, Z, kT, n_sweeps, rng, sigma=0.5, adapt=True, target=0.5):
+        """pyMagCalc `thermalize`'s sweep loop on the stream `rng` (an `Rng`).
+        Returns (Z as a list, sigma, acceptance per recorded sweep, energy per
+        recorded sweep) -- the recorded sweeps are the fixed-sigma second half."""
+        if not isinstance(rng, Rng):
+            raise TypeError("thermalize needs an rsmagcalc.Rng, got %r" % type(rng).__name__)
+        flat, sig, accs, energies = self._m.thermalize(
+            self.pack(Z), float(kT), int(n_sweeps), rng._r, float(sigma), bool(adapt),
+            float(target))
+        return self.unpack(flat), float(sig), accs, energies
+
+    def evolve(self, Z0, dt, n_steps, record_every=1, damping=0.0):
+        """Deterministic trajectory: a list over recorded steps of per-site lists."""
+        rec = self._m.evolve(self.pack(Z0), float(dt), int(n_steps), int(record_every),
+                             float(damping))
+        return [self.unpack(row) for row in rec]
+
+    def quench(self, Z0, dt, n_steps, damping):
+        """`n_steps` damped RK4 steps; the final state as a list."""
+        return self.unpack(self._m.quench(self.pack(Z0), float(dt), int(n_steps),
+                                          float(damping)))
+
+    def sampled_trajectories(self, Z0, kT, traj_start, n_traj, therm_sweeps, sigma,
+                             adapt, target, dt, n_steps, record_every=1, seed=0,
+                             n_workers=None):
+        """`n_traj` thermalized trajectories in parallel, starting from `Z0` (or
+        from random coherent states when `Z0` is None). Returns (traj as an
+        (n_traj, n_rec, D) packed array, sigma per trajectory, acceptance
+        (n_traj, n_meas), energies (n_traj, n_meas)); trajectory i owns the stream
+        (seed, traj_start + i), so chunked calls reproduce one call."""
+        z0 = None if Z0 is None else self.pack(Z0)
+        return self._m.sampled_trajectories(
+            z0, float(kT), int(traj_start), int(n_traj), int(therm_sweeps), float(sigma),
+            bool(adapt), float(target), float(dt), int(n_steps), int(record_every),
+            int(seed), None if n_workers is None else int(n_workers))
