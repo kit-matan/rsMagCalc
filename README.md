@@ -68,4 +68,20 @@ GRADIENT, as pyMagCalc's `local_field` returns it. Pinned in
 to 1e-12 (measured 2e-16) over 50 rk4 and 50 midpoint steps, the single-move dE
 equals E(after) − E(before) to 1e-12, plus the exact classical-dimer thermodynamics
 and the Langevin function. pyMagCalc selects it with `calculation: {kernels: rust}`
-and runs its own oracle tests under both kernel sets. K2–K6 follow the plan.
+and runs its own oracle tests under both kernel sets.
+
+M2 (K2, `src/cpn.rs`, `rsmagcalc.CpnModel`): the CP^(N−1) Metropolis sampler for
+SU(N) coherent states with pyMagCalc's adaptive step size (`thermalize`, returning
+the per-sweep acceptance and energy record the equilibration verdict is made
+from), the RK4 integrator (`evolve`), the damped quench (`quench`) and
+`sampled_trajectories` (rayon over trajectories, stream (seed, i) each). The
+model's per-site operator tables, on-site matrices and bond list are packed once
+as RAGGED arrays, so a mixed-spin cell runs through the kernel where pyMagCalc's
+vectorized path refuses it. The energy change of a proposal is the term-by-term
+change of the bond terms touching the site plus its on-site term — exact for any
+bond list — where the NumPy sampler re-evaluates the total energy twice per site.
+Pinned in `tests/test_cpn_parity.py`: that dE equals E(after) − E(before) to 1e-12
+on plain SU(3), biquadratic (12-wide operator set), mixed-spin and self-bonded
+cells; `h_i|Z_i>` against the `local_field` definition; `evolve` and `quench`
+against `magcalc.sun.dynamics` to 1e-12 over 50 steps; the sampler against the
+closed-form partition function of a decoupled site. K3–K6 follow the plan.
