@@ -10,8 +10,9 @@
 //! diagonalization, one-magnon correlations and the shifted-Cholesky guard, on
 //! the platform LAPACK through `lapack`). M4: `kpm` (K4, the KPM Chebyshev
 //! recursion and its power-iteration bound, on H(q) from K3's builder, sparse
-//! when H(q) is). The remaining kernel (SCGA) follows the order in
-//! ../RUST_KERNELS_PLAN.md.
+//! when H(q) is). M5: `scga` (K5, the SCGA Fourier exchange matrix, its mesh
+//! eigenvalues, the per-site sum-rule traces and the diffuse-S(q) correlation
+//! tensors). The order and the oracles are in ../RUST_KERNELS_PLAN.md.
 //!
 //! Conventions shared with the Python side, and never to be re-derived here:
 //!   * the classical energy is E = 1/2 m^T H m + b^T m with H the (3N x 3N)
@@ -21,6 +22,7 @@ mod classical;
 mod cpn;
 mod kpm;
 mod lapack;
+mod scga;
 mod sparse_guard;
 mod sun_lswt;
 
@@ -95,5 +97,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     cpn::register(m)?;
     sun_lswt::register(m)?;
     kpm::register(m)?;
+    scga::register(m)?;
     Ok(())
 }

@@ -17,7 +17,7 @@ __all__ = ["backend", "build_info", "describe", "classical_energy",
            "Rng", "move_energy_change", "sweep", "parallel_tempering", "evolve",
            "langevin", "wang_landau", "sampled_trajectories", "CpnModel",
            "SunModel", "NotPositiveDefinite", "kpm_start_vector", "kpm_moments",
-           "spectral_bound"]
+           "spectral_bound", "ScgaModel"]
 
 try:
     from . import _core
@@ -589,3 +589,88 @@ def spectral_bound(HMat, n_iter=40, pad=1.15, seed=0, sparse=None):
     H = np.ascontiguousarray(HMat, dtype=np.complex128)
     return _core.spectral_bound(H, kpm_start_vector(H.shape[0], seed), int(n_iter),
                                 float(pad), sparse)
+
+
+# --------------------------------------------------------------------------
+# K5: the self-consistent Gaussian approximation (SCGA)
+# --------------------------------------------------------------------------
+# Mirrors pyMagCalc `scga.py` (`fourier_exchange_matrix`, the eigenvalue mesh of
+# `solve_lambda`, `sublattice_sum_rule_residuals`, and `scga_intensities` up to
+# `_contract`) and is pinned to it in tests/test_scga_parity.py. The lambda root
+# solve, its bracketing, the sublattice refusal and the cross-section contraction
+# stay in pyMagCalc.
+
+class ScgaModel:
+    """A pyMagCalc `scga._exchange_cache`, packed for the SCGA kernels.
+
+    `bonds` is the cache's directed bond list `(i, jc, R_cart, M)` in its order
+    (M real 3 x 3), `pos` (N, 3) Cartesian site positions, `g` the per-site 3 x 3
+    g-tensors, `spins` (N,). `from_cache` takes the dict itself.
+    """
+
+    __slots__ = ("_m", "N")
+
+    def __init__(self, bonds, pos, g, spins):
+        import numpy as np
+
+        _need_core()
+        pos = _f64(np.asarray(pos, dtype=np.float64).reshape(-1, 3))
+        N = pos.shape[0]
+        bonds = list(bonds)
+        nb = len(bonds)
+        bi = np.array([int(b[0]) for b in bonds], dtype=np.int64)
+        bj = np.array([int(b[1]) for b in bonds], dtype=np.int64)
+        r = np.zeros((nb, 3))
+        m = np.zeros((nb, 3, 3))
+        for k, (_i, _j, R, M) in enumerate(bonds):
+            r[k] = np.asarray(R, dtype=np.float64).reshape(3)
+            M = np.asarray(M)
+            if np.iscomplexobj(M) and np.any(M.imag):
+                raise ValueError(f"bond {k}: M must be real")
+            m[k] = np.real(M).reshape(3, 3)
+        g = _f64(np.asarray(g, dtype=np.float64).reshape(N, 3, 3))
+        spins = _f64(np.asarray(spins, dtype=np.float64).reshape(N))
+        self._m = _core.ScgaModel(bi, bj, _f64(r), _f64(m), pos, g, spins)
+        self.N = N
+
+    @classmethod
+    def from_cache(cls, cache):
+        return cls(cache["bonds"], cache["pos"], cache["g"], cache["spins"])
+
+    @staticmethod
+    def _qs(qs):
+        import numpy as np
+
+        return np.ascontiguousarray(np.asarray(qs, dtype=np.float64).reshape(-1, 3))
+
+    def fourier(self, qs, n_workers=None):
+        """J(q) per q: (nq, 3N, 3N) complex (`fourier_exchange_matrix`)."""
+        return self._m.fourier(self._qs(qs), n_workers)
+
+    def eigenvalues(self, qs, n_workers=None):
+        """The eigenvalues of J(q) per q, ascending: (nq, 3N) (`eigvalsh`)."""
+        return self._m.eigenvalues(self._qs(qs), n_workers)
+
+    def site_traces(self, qs, lam, n_workers=None):
+        """Tr_3 of each site's diagonal block of (lam + J(q))^{-1}: (nq, N)."""
+        return self._m.site_traces(self._qs(qs), float(lam), n_workers)
+
+    def sum_rule_residuals(self, mesh, lam, kT, n_workers=None):
+        """`sublattice_sum_rule_residuals` over `mesh`: (N,)."""
+        return self._m.sum_rule_residuals(self._qs(mesh), float(lam), float(kT), n_workers)
+
+    def correlations(self, qs, lam, kT, ff=None, apply_g=True, n_workers=None):
+        """C^{ab}(q) = kT sum_ij f_i f_j conj(e^{iq.r_i}) e^{iq.r_j} g_i
+        [(lam + J(q))^{-1}]_ij g_j^T: (nq, 3, 3) complex, before the cross-section
+        contraction. `ff` (nq, N) real form factors (None: 1); `apply_g` False uses
+        g = I (the bare spin correlations)."""
+        import numpy as np
+
+        qs = self._qs(qs)
+        if ff is not None:
+            ff = _f64(np.asarray(ff, dtype=np.float64).reshape(len(qs), self.N))
+        return self._m.correlations(qs, float(lam), float(kT), ff, bool(apply_g),
+                                    n_workers)
+
+    def __repr__(self):
+        return repr(self._m)

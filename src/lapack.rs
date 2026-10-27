@@ -1,4 +1,4 @@
-//! Thin FFI to the platform LAPACK/BLAS, complex double only, for K3.
+//! Thin FFI to the platform LAPACK/BLAS, complex double only, for K3 (and K4/K5).
 //!
 //! WHY LAPACK AND NOT `faer`. The plan (RUST_KERNELS_PLAN.md §2) names faer first
 //! and allows LAPACK through Accelerate "if its c64 routines prove slow at
@@ -60,6 +60,15 @@ extern "C" {
     fn zherk_(uplo: *const c_char, trans: *const c_char, n: *const Int, k: *const Int,
               alpha: *const f64, a: *const C, lda: *const Int, beta: *const f64,
               c: *mut C, ldc: *const Int, l_uplo: usize, l_trans: usize);
+    #[link_name = "zpotrs$NEWLAPACK$ILP64"]
+    fn zpotrs_(uplo: *const c_char, n: *const Int, nrhs: *const Int, a: *const C,
+               lda: *const Int, b: *mut C, ldb: *const Int, info: *mut Int, l_uplo: usize);
+    #[link_name = "ztrtri$NEWLAPACK$ILP64"]
+    fn ztrtri_(uplo: *const c_char, diag: *const c_char, n: *const Int, a: *mut C,
+               lda: *const Int, info: *mut Int, l_uplo: usize, l_diag: usize);
+    #[link_name = "zgesv$NEWLAPACK$ILP64"]
+    fn zgesv_(n: *const Int, nrhs: *const Int, a: *mut C, lda: *const Int, ipiv: *mut Int,
+              b: *mut C, ldb: *const Int, info: *mut Int);
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -87,6 +96,12 @@ extern "C" {
     fn zherk_(uplo: *const c_char, trans: *const c_char, n: *const Int, k: *const Int,
               alpha: *const f64, a: *const C, lda: *const Int, beta: *const f64,
               c: *mut C, ldc: *const Int, l_uplo: usize, l_trans: usize);
+    fn zpotrs_(uplo: *const c_char, n: *const Int, nrhs: *const Int, a: *const C,
+               lda: *const Int, b: *mut C, ldb: *const Int, info: *mut Int, l_uplo: usize);
+    fn ztrtri_(uplo: *const c_char, diag: *const c_char, n: *const Int, a: *mut C,
+               lda: *const Int, info: *mut Int, l_uplo: usize, l_diag: usize);
+    fn zgesv_(n: *const Int, nrhs: *const Int, a: *mut C, lda: *const Int, ipiv: *mut Int,
+              b: *mut C, ldb: *const Int, info: *mut Int);
 }
 
 const ONE: C = C { re: 1.0, im: 0.0 };
@@ -209,4 +224,72 @@ pub fn zherk_lower_sub(n: usize, k: usize, a: *const C, lda: usize, c: *mut C, l
         zherk_(&(b'L' as c_char), &(b'N' as c_char), &(n as Int), &(k as Int), &alpha, a,
                &(lda as Int), &beta, c, &(ldc as Int), 1, 1)
     };
+}
+
+// K5 (`scga.rs`): eigenvalues only, a Hermitian positive-definite solve, the
+// inverse's diagonal from the Cholesky factor, and the general LU solve NumPy's
+// `inv` makes, for the case the matrix is not positive definite.
+
+/// Eigenvalues only (ascending, into `w`) of a Hermitian matrix, column major,
+/// read from the `uplo` triangle; `a` is destroyed. The workspace is the size
+/// LAPACK asks for (a query first), as NumPy's `eigvalsh` does: the blocking of
+/// the tridiagonal reduction depends on it, and with it the rounding.
+pub fn zheevd_values(n: usize, a: &mut [C], w: &mut [f64], uplo: u8) -> Result<(), Int> {
+    let nn = n as Int;
+    let mut info: Int = 0;
+    let (mut wq, mut rq, mut iq) = ([ZERO], [0.0f64], [0 as Int]);
+    let m1: Int = -1;
+    unsafe {
+        zheevd_(&(b'N' as c_char), &(uplo as c_char), &nn, a.as_mut_ptr(), &nn,
+                w.as_mut_ptr(), wq.as_mut_ptr(), &m1, rq.as_mut_ptr(), &m1,
+                iq.as_mut_ptr(), &m1, &mut info, 1, 1)
+    };
+    if info != 0 {
+        return Err(info);
+    }
+    let lwork = (wq[0].re as usize).max(n + 1);
+    let lrwork = (rq[0] as usize).max(n.max(1));
+    let liwork = (iq[0] as usize).max(1);
+    let mut work = vec![ZERO; lwork];
+    let mut rwork = vec![0.0f64; lrwork];
+    let mut iwork = vec![0 as Int; liwork];
+    unsafe {
+        zheevd_(&(b'N' as c_char), &(uplo as c_char), &nn, a.as_mut_ptr(), &nn,
+                w.as_mut_ptr(), work.as_mut_ptr(), &(lwork as Int), rwork.as_mut_ptr(),
+                &(lrwork as Int), iwork.as_mut_ptr(), &(liwork as Int), &mut info, 1, 1)
+    };
+    if info == 0 { Ok(()) } else { Err(info) }
+}
+
+/// B <- A^{-1} B from the upper Cholesky factor of `zpotrf_upper` (n x n), B being
+/// n x k, column major.
+pub fn zpotrs_upper(n: usize, k: usize, u: &[C], b: &mut [C]) -> Result<(), Int> {
+    let mut info: Int = 0;
+    unsafe {
+        zpotrs_(&(b'U' as c_char), &(n as Int), &(k as Int), u.as_ptr(), &(n as Int),
+                b.as_mut_ptr(), &(n as Int), &mut info, 1)
+    };
+    if info == 0 { Ok(()) } else { Err(info) }
+}
+
+/// U <- U^{-1} in place for an upper-triangular U (n x n, column major).
+pub fn ztrtri_upper(n: usize, u: &mut [C]) -> Result<(), Int> {
+    let mut info: Int = 0;
+    unsafe {
+        ztrtri_(&(b'U' as c_char), &(b'N' as c_char), &(n as Int), u.as_mut_ptr(),
+                &(n as Int), &mut info, 1, 1)
+    };
+    if info == 0 { Ok(()) } else { Err(info) }
+}
+
+/// B <- A^{-1} B by LU with partial pivoting (A n x n, B n x k, column major; A is
+/// overwritten by its factors). `Err(k > 0)`: A is exactly singular.
+pub fn zgesv(n: usize, k: usize, a: &mut [C], b: &mut [C]) -> Result<(), Int> {
+    let mut info: Int = 0;
+    let mut ipiv = vec![0 as Int; n.max(1)];
+    unsafe {
+        zgesv_(&(n as Int), &(k as Int), a.as_mut_ptr(), &(n as Int), ipiv.as_mut_ptr(),
+               b.as_mut_ptr(), &(n as Int), &mut info)
+    };
+    if info == 0 { Ok(()) } else { Err(info) }
 }
