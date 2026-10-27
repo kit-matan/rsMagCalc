@@ -3,10 +3,14 @@
 Rust kernels, behind PyO3, for the loops in pyMagCalc that are Python-bound per
 site or per q: the classical Metropolis sweep and Landau–Lifshitz integrator, the
 CP^(N−1) sampler, SU(N) LSWT assembly and Bogoliubov diagonalization, the KPM
-Chebyshev recursion, and SCGA. The scope, the order, and the oracle each kernel is
-pinned to are in `../RUST_KERNELS_PLAN.md` at the workspace root. This is **not** a
-port of pyMagCalc: the config, symmetry, symbolic model builder, runner, fitting and
-plotting stay in Python, and the dipole LSWT hot path stays with fMagCalc.
+Chebyshev recursion, and SCGA. What each kernel covers, the oracle it is pinned to and
+its measured speed-up are recorded in pyMagCalc's
+[`GAP_STATUS.md`](https://github.com/kit-matan/pyMagCalc/blob/master/GAP_STATUS.md)
+under "Rust kernels K1" to "K5". This is **not** a port of pyMagCalc: the config,
+symmetry, symbolic model builder, runner, fitting and plotting stay in Python, and
+the dipole LSWT hot path stays with [fMagCalc](https://github.com/kit-matan/fMagCalc).
+New to MagCalc? Start with pyMagCalc's
+[`MAGCALC_GUIDE.md`](https://github.com/kit-matan/pyMagCalc/blob/master/MAGCALC_GUIDE.md).
 
 The contract is fMagCalc's:
 
@@ -21,11 +25,19 @@ The contract is fMagCalc's:
 
 ## Build
 
+You need a Rust toolchain (`rustup`) and maturin. To use the kernels:
+
+```bash
+pip install maturin
+pip install git+https://github.com/kit-matan/rsMagCalc
+python -c "import rsmagcalc; print(rsmagcalc.backend, rsmagcalc.describe())"   # pyo3 (...)
+```
+
+To work on them, in a clone:
+
 ```bash
 cd rsMagCalc
-pip install maturin
 pip install -e . --no-build-isolation   # compiles rsmagcalc._core; editable, like pyMagCalc
-python -c "import rsmagcalc; print(rsmagcalc.backend, rsmagcalc.describe())"
 pytest                                  # parity against pyMagCalc, which must be installed
 ```
 
@@ -149,4 +161,7 @@ cross-section contraction stay in pyMagCalc. Pinned in `tests/test_scga_parity.p
 anisotropic g and Cu2+ form factors, and a 16-site pyrochlore. That cell's
 `solve_lambda` 3.9 s -> 0.17 s, a 1681-q map 2.5 s -> 27 ms
 (`pyMagCalc/GAP_STATUS.md`, "Rust kernels K5").
-K6 (optional) follows the plan.
+K6, the mixed-spin dipole S(Q,ω), did not come here. The dipole path is fMagCalc's,
+and fMagCalc lacked only the per-site √(S_i/2) prefactor, so it went there instead
+(fMagCalc `eae20e3`; pyMagCalc `GAP_STATUS.md`, "K6"). That completes the plan:
+the work here is K1–K5 plus the sparse guard.
