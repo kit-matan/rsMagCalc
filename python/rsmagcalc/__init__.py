@@ -499,11 +499,23 @@ class SunModel:
         cross-section contraction and the form factor."""
         return self._m.correlations(self._qs(qs), n_workers)
 
-    def stable(self, qs, shift, n_workers=None):
-        """Per q: is H2(q) + shift I positive definite (`SUNModel.is_stable_at`)?"""
+    def stable(self, qs, shift, n_workers=None, sparse=None):
+        """Per q: is H2(q) + shift I positive definite (`SUNModel.is_stable_at`)?
+
+        `sparse`: None lets the model choose (a multifrontal sparse Cholesky on a
+        minimum-degree ordering when it needs at most a quarter of the dense flops
+        and 2D >= 64, else one dense `zpotrf`); True / False force either. Both
+        test the same bit-identical shifted matrix; see `guard_info`."""
         import numpy as np
 
-        return np.asarray(self._m.stable(self._qs(qs), float(shift), n_workers), dtype=bool)
+        return np.asarray(self._m.stable(self._qs(qs), float(shift), n_workers, sparse),
+                          dtype=bool)
+
+    def guard_info(self):
+        """The sparse guard's analysis: n, n_super, n_fronts, nnz_l, flops_sparse,
+        flops_dense, max_front, `auto` (the choice `stable(sparse=None)` makes) and
+        `error` (None unless the analysis failed, in which case auto is dense)."""
+        return dict(self._m.guard_info())
 
     def kpm_moments(self, qs, n_moments=None, gammas=None, fwhm=None, tol=None,
                     n_iter=40, pad=1.15, seed=0, sparse=None, n_workers=None):

@@ -311,8 +311,15 @@ def _shift(mdl, rel_tol=lswt.H2_REL_TOL):
 
 
 def _verdicts(mdl, qs, rel_tol=lswt.H2_REL_TOL):
+    """The kernel's verdicts (automatic path) and `is_stable_at`'s. Both kernel
+    paths -- the sparse multifrontal Cholesky and the dense zpotrf -- are forced
+    as well and must agree with the automatic one on every q, so every guard case
+    below pins both (tests/test_sparse_guard.py has the rest)."""
     rs = _pack(mdl)
-    got = rs.stable(qs, _shift(mdl, rel_tol))
+    shift = _shift(mdl, rel_tol)
+    got = rs.stable(qs, shift)
+    for sparse in (True, False):
+        assert np.array_equal(rs.stable(qs, shift, sparse=sparse), got), f"sparse={sparse}"
     ref = np.array([mdl.is_stable_at(q, rel_tol=rel_tol) for q in qs])
     return got, ref
 
@@ -344,8 +351,10 @@ def test_guard_passes_the_non_collinear_state_at_gamma_and_K_and_the_tolerance_m
     assert np.array_equal(got, ref) and got.all()
     # the same q-INDEPENDENT shift as the Python guard: with no shift the Goldstone
     # zeros at Gamma and K decide on round-off, exactly as the docstring warns
+    # (the DENSE path: a round-off verdict depends on the elimination order, so
+    # the sparse one need not repeat it -- which is the shift's whole point)
     rs = _pack(mdl)
-    unshifted = rs.stable(qs[:2], 0.0)
+    unshifted = rs.stable(qs[:2], 0.0, sparse=False)
     assert list(unshifted) == [bool(lswt._is_positive_definite(mdl.h2_matrix(q)))
                                for q in qs[:2]]
 

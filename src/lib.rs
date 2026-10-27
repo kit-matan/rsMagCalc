@@ -21,6 +21,7 @@ mod classical;
 mod cpn;
 mod kpm;
 mod lapack;
+mod sparse_guard;
 mod sun_lswt;
 
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};

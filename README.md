@@ -120,4 +120,17 @@ and the reconstruction stay in pyMagCalc. Pinned in `tests/test_kpm_parity.py`
 fixture plus 36- and 81-site non-collinear supercells; the bound; the chiral
 channel end to end; the Goldstone point. S09 L = 30 KPM: 1.4 s/q -> 43 ms/q with
 pyMagCalc's stability guard included (`pyMagCalc/GAP_STATUS.md`, "Rust kernels K4").
+
+The guard on a sparse Cholesky (`src/sparse_guard.rs`): `SunModel.stable` factors
+H2(q) + shift I with a multifrontal Cholesky on a minimum-degree ordering
+(analysed once per model; Accelerate `zpotrf`/`ztrsm`/`zherk` per front) when
+2D >= 64 and that needs at most a quarter of the dense flops, else one dense
+`zpotrf` as before; `sparse=` forces either and `guard_info()` reports the choice.
+The matrix entries are bit-identical to the dense path's (`SunModel::assemble`
+emits its contributions in a q-independent order), so only the factorization's
+rounding differs. Pinned in `tests/test_sparse_guard.py` (exact verdicts at
+shift = -min eig +- 1e-9 scale, the Goldstone zeros, Sunny's sigma = 1/3 refused,
+a dense operator kept dense) and by forcing both paths in every guard case of
+`tests/test_sun_lswt_parity.py`. S09 L = 30: guard 38 -> 1.05 ms/q, a KPM q
+43 -> 7.6 ms (`pyMagCalc/GAP_STATUS.md`, "guard 3 on a SPARSE Cholesky").
 K5–K6 follow the plan.

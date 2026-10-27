@@ -56,6 +56,10 @@ extern "C" {
               k: *const Int, alpha: *const C, a: *const C, lda: *const Int, b: *const C,
               ldb: *const Int, beta: *const C, c: *mut C, ldc: *const Int,
               l_transa: usize, l_transb: usize);
+    #[link_name = "zherk$NEWLAPACK$ILP64"]
+    fn zherk_(uplo: *const c_char, trans: *const c_char, n: *const Int, k: *const Int,
+              alpha: *const f64, a: *const C, lda: *const Int, beta: *const f64,
+              c: *mut C, ldc: *const Int, l_uplo: usize, l_trans: usize);
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -80,6 +84,9 @@ extern "C" {
               k: *const Int, alpha: *const C, a: *const C, lda: *const Int, b: *const C,
               ldb: *const Int, beta: *const C, c: *mut C, ldc: *const Int,
               l_transa: usize, l_transb: usize);
+    fn zherk_(uplo: *const c_char, trans: *const c_char, n: *const Int, k: *const Int,
+              alpha: *const f64, a: *const C, lda: *const Int, beta: *const f64,
+              c: *mut C, ldc: *const Int, l_uplo: usize, l_trans: usize);
 }
 
 const ONE: C = C { re: 1.0, im: 0.0 };
@@ -169,5 +176,37 @@ pub fn zgemm(m: usize, n: usize, k: usize, a: &[C], lda: usize, b: &[C], ldb: us
         zgemm_(&(b'N' as c_char), &tb, &(m as Int), &(n as Int), &(k as Int), &ONE,
                a.as_ptr(), &(lda as Int), b.as_ptr(), &(ldb as Int), &ZERO,
                c.as_mut_ptr(), &(ldc as Int), 1, 1)
+    };
+}
+
+// The three dense kernels of one multifrontal front (`sparse_guard.rs`): column
+// major, LOWER triangle, leading dimension `ld` (the front order, so that the
+// pivot block, the off-diagonal block and the update block are views of one
+// buffer).
+
+/// Lower Cholesky of the leading n x n block, in place: `Err(k > 0)` when the
+/// leading k x k minor is not positive definite -- the same test `zpotrf_upper`
+/// makes, on the other triangle.
+pub fn zpotrf_lower_ld(n: usize, a: &mut [C], ld: usize) -> Result<(), Int> {
+    let mut info: Int = 0;
+    unsafe { zpotrf_(&(b'L' as c_char), &(n as Int), a.as_mut_ptr(), &(ld as Int), &mut info, 1) };
+    if info == 0 { Ok(()) } else { Err(info) }
+}
+
+/// B <- B L^{-H} for a lower-triangular L (n x n, leading dimension `lda`), B
+/// being m x n with leading dimension `ldb`.
+pub fn ztrsm_right_lower_conj(m: usize, n: usize, l: *const C, lda: usize, b: *mut C, ldb: usize) {
+    unsafe {
+        ztrsm_(&(b'R' as c_char), &(b'L' as c_char), &(b'C' as c_char), &(b'N' as c_char),
+               &(m as Int), &(n as Int), &ONE, l, &(lda as Int), b, &(ldb as Int), 1, 1, 1, 1)
+    };
+}
+
+/// C <- C - A A^H on the lower triangle; A is n x k (lda), C n x n (ldc).
+pub fn zherk_lower_sub(n: usize, k: usize, a: *const C, lda: usize, c: *mut C, ldc: usize) {
+    let (alpha, beta) = (-1.0f64, 1.0f64);
+    unsafe {
+        zherk_(&(b'L' as c_char), &(b'N' as c_char), &(n as Int), &(k as Int), &alpha, a,
+               &(lda as Int), &beta, c, &(ldc as Int), 1, 1)
     };
 }

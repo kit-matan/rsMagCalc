@@ -39,8 +39,11 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
+use std::sync::OnceLock;
+
 use crate::classical::with_pool;
 use crate::lapack;
+use crate::sparse_guard::SparseGuard;
 
 type C = Complex64;
 
@@ -83,6 +86,8 @@ pub struct SunModel {
     bonds: Vec<Bond>,
     mt: Vec<MomentTerm>,
     n_cells: f64,
+    /// The sparse guard's analysis, built on first use (`stable`).
+    sparse: OnceLock<Result<SparseGuard, String>>,
 }
 
 pub(crate) fn perr(msg: impl Into<String>) -> PyErr {
@@ -118,10 +123,27 @@ impl SunModel {
 
     /// g H2(q), row major (2D x 2D), into `h` (overwritten).
     pub(crate) fn build_h(&self, q: [f64; 3], h: &mut [C]) {
-        let (n, d) = (self.n, self.d);
+        let n = self.n;
         for z in h.iter_mut() {
             *z = ZERO;
         }
+        self.assemble(q, |r, c, v| h[r * n + c] += v);
+        for r in self.d..n {
+            for z in &mut h[r * n..(r + 1) * n] {
+                *z = -*z;
+            }
+        }
+    }
+
+    /// Every contribution to H(q) BEFORE the rows D..2D are negated, i.e. to H2
+    /// itself, as `add(row, col, value)`. The sequence of (row, col) -- its length
+    /// and its order -- does not depend on q: `build_h` sums it into a dense
+    /// matrix, and the sparse guard (`sparse_guard.rs`) records it once and then
+    /// sums the same values in the same order into its own slots, so the two
+    /// paths hold bit-identical matrix entries.
+    #[inline(always)]
+    pub(crate) fn assemble(&self, q: [f64; 3], mut add: impl FnMut(usize, usize, C)) {
+        let d = self.d;
         for b in &self.bonds {
             let arg = q[0] * b.dr[0] + q[1] * b.dr[1] + q[2] * b.dr[2];
             let ph = C::new(arg.cos(), arg.sin());
@@ -134,14 +156,13 @@ impl SunModel {
                 let tbj = self.tb_of(b.j, bb);
                 let cph = ph * c;
                 for m in 0..mi {
-                    let r1 = (bi + m) * n;
-                    let r2 = (d + bi + m) * n;
+                    let (r1, r2) = (bi + m, d + bi + m);
                     let (x, xb) = (ti[m] * cph, tbi[m] * cph);
                     for nn in 0..mj {
-                        h[r1 + bj + nn] += xb * tj[nn]; // H11: c tb_i t_j ph
-                        h[r2 + d + bj + nn] += x * tbj[nn]; // H22: c t_i tb_j ph
-                        h[r1 + d + bj + nn] += xb * tbj[nn]; // H12: c tb_i tb_j ph
-                        h[r2 + bj + nn] += x * tj[nn]; // H21: c t_i t_j ph
+                        add(r1, bj + nn, xb * tj[nn]); // H11: c tb_i t_j ph
+                        add(r2, d + bj + nn, x * tbj[nn]); // H22: c t_i tb_j ph
+                        add(r1, d + bj + nn, xb * tbj[nn]); // H12: c tb_i tb_j ph
+                        add(r2, bj + nn, x * tj[nn]); // H21: c t_i t_j ph
                     }
                 }
                 // on-site mean field at i, weighted by <O^b>_j -- NO phase
@@ -150,8 +171,8 @@ impl SunModel {
                 for m in 0..mi {
                     for nn in 0..mi {
                         let mf = qi[m * mi + nn] * s;
-                        h[(bi + m) * n + bi + nn] += mf;
-                        h[(d + bi + nn) * n + d + bi + m] += mf; // H22 += mf^T
+                        add(bi + m, bi + nn, mf);
+                        add(d + bi + nn, d + bi + m, mf); // H22 += mf^T
                     }
                 }
             }
@@ -163,15 +184,10 @@ impl SunModel {
                 for m in 0..mi {
                     for nn in 0..mi {
                         let v = qa[m * mi + nn];
-                        h[(bi + m) * n + bi + nn] += v;
-                        h[(d + bi + nn) * n + d + bi + m] += v;
+                        add(bi + m, bi + nn, v);
+                        add(d + bi + nn, d + bi + m, v);
                     }
                 }
-            }
-        }
-        for r in d..n {
-            for z in &mut h[r * n..(r + 1) * n] {
-                *z = -*z;
             }
         }
     }
@@ -247,6 +263,29 @@ impl SunModel {
         }
         lapack::zheevd_vectors(n, wmat, w)
             .map_err(|info| PyRuntimeError::new_err(format!("zheevd failed, info = {info}")))
+    }
+
+    /// The sparse guard's analysis, built once per packed model.
+    fn sparse_guard(&self) -> Result<&SparseGuard, &str> {
+        self.sparse.get_or_init(|| SparseGuard::analyse(self)).as_ref().map_err(|e| e.as_str())
+    }
+
+    /// Below this order the dense factorization is a few microseconds and the
+    /// analysis is not worth building. Measured on the 120-degree triangular cell,
+    /// one thread: 2D = 72 dense 50 / sparse 34 us per q, 2D = 162 257 / 94,
+    /// 2D = 288 782 / 163, 2D = 882 10.6 / 0.81 ms.
+    const SPARSE_MIN_N: usize = 64;
+
+    /// Sparse when the order is large enough and the sparse factorization needs at
+    /// most a quarter of the dense one's flops (it runs nearer BLAS-2 speed on its
+    /// small fronts); otherwise -- a dense operator, a small cell, an analysis
+    /// error -- the dense `zpotrf`.
+    fn use_sparse_guard(&self) -> bool {
+        if self.n < Self::SPARSE_MIN_N {
+            return false;
+        }
+        let dense = (self.n as f64).powi(3) / 3.0;
+        matches!(self.sparse_guard(), Ok(g) if 4.0 * g.flops <= dense)
     }
 
     fn not_pd(q: [f64; 3]) -> PyErr {
@@ -382,7 +421,7 @@ impl SunModel {
             mt.push(MomentTerm { site, d: [mtd[[k, 0]], mtd[[k, 1]], mtd[[k, 2]]], idx });
         }
         Ok(SunModel { l, nop, d, n: 2 * d, ms, offs, s0, t, tb, q: qv, qoff, qa, qaoff, qa_nz,
-                      bonds, mt, n_cells })
+                      bonds, mt, n_cells, sparse: OnceLock::new() })
     }
 
     #[getter]
@@ -544,13 +583,35 @@ impl SunModel {
     }
 
     /// The ground-state guard per q: is H2(q) + shift I positive definite?
-    #[pyo3(signature = (qs, shift, n_workers=None))]
+    ///
+    /// `sparse`: None decides per model (`use_sparse_guard`), True / False force
+    /// the sparse multifrontal Cholesky / the dense `zpotrf`. Both decide the same
+    /// question on bit-identical matrix entries (`sparse_guard.rs`).
+    #[pyo3(signature = (qs, shift, n_workers=None, sparse=None))]
     fn stable(&self, py: Python<'_>, qs: PyReadonlyArray2<'_, f64>, shift: f64,
-              n_workers: Option<usize>) -> PyResult<Vec<bool>> {
+              n_workers: Option<usize>, sparse: Option<bool>) -> PyResult<Vec<bool>> {
         let qs = qs_vec(&qs)?;
         let (n, nq) = (self.n, qs.len());
         py.detach(move || -> PyResult<Vec<bool>> {
+            let use_sparse = match sparse {
+                Some(false) => false,
+                Some(true) => {
+                    self.sparse_guard().map_err(|e| PyRuntimeError::new_err(
+                        format!("sparse guard analysis failed: {e}")))?;
+                    true
+                }
+                None => self.use_sparse_guard(),
+            };
             let mut out = vec![false; nq];
+            if use_sparse {
+                let g = self.sparse_guard().unwrap();
+                capped_pool(n_workers, g.peak_bytes + g.n_slots_bytes(), || {
+                    out.par_iter_mut().zip(qs.par_iter()).for_each(|(ok, &q)| {
+                        *ok = g.positive_definite(self, q, shift);
+                    });
+                })?;
+                return Ok(out);
+            }
             capped_pool(n_workers, 2 * n * n * 16, || {
                 out.par_iter_mut().zip(qs.par_iter()).for_each(|(ok, &q)| {
                     let mut h = vec![ZERO; n * n];
@@ -565,6 +626,32 @@ impl SunModel {
             })?;
             Ok(out)
         })
+    }
+
+    /// The sparse guard's analysis and the automatic choice, for tests and timing
+    /// notes: n, supervariables, fronts, nnz(L), the complex flop counts of the
+    /// sparse and the dense factorization, the largest front, `auto` (what
+    /// `stable(sparse=None)` uses) and `error` (an analysis failure, or None).
+    fn guard_info<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let d = pyo3::types::PyDict::new(py);
+        let n = self.n;
+        d.set_item("n", n)?;
+        d.set_item("flops_dense", (n as f64).powi(3) / 3.0)?;
+        let auto = py.detach(|| self.use_sparse_guard());
+        match py.detach(|| self.sparse_guard().map(|g| (g.n_super, g.n_fronts(), g.nnz_l,
+                                                       g.flops, g.max_front))) {
+            Ok((ns, nf, nnz, fl, mf)) => {
+                d.set_item("n_super", ns)?;
+                d.set_item("n_fronts", nf)?;
+                d.set_item("nnz_l", nnz)?;
+                d.set_item("flops_sparse", fl)?;
+                d.set_item("max_front", mf)?;
+                d.set_item("error", py.None())?;
+            }
+            Err(e) => d.set_item("error", e)?,
+        }
+        d.set_item("auto", auto)?;
+        Ok(d)
     }
 
     fn __repr__(&self) -> String {
