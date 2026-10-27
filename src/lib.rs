@@ -8,8 +8,10 @@
 //! Metropolis sampler, RK4 integrator and damped quench for SU(N) coherent
 //! states). M3: `sun_lswt` (K3, the SU(N) LSWT H(q) assembly, Colpa
 //! diagonalization, one-magnon correlations and the shifted-Cholesky guard, on
-//! the platform LAPACK through `lapack`). The remaining kernels (KPM, SCGA)
-//! follow the order in ../RUST_KERNELS_PLAN.md.
+//! the platform LAPACK through `lapack`). M4: `kpm` (K4, the KPM Chebyshev
+//! recursion and its power-iteration bound, on H(q) from K3's builder, sparse
+//! when H(q) is). The remaining kernel (SCGA) follows the order in
+//! ../RUST_KERNELS_PLAN.md.
 //!
 //! Conventions shared with the Python side, and never to be re-derived here:
 //!   * the classical energy is E = 1/2 m^T H m + b^T m with H the (3N x 3N)
@@ -17,6 +19,7 @@
 //!   * m is (N, 3) row-major, flattened exactly as NumPy's `ravel()` does.
 mod classical;
 mod cpn;
+mod kpm;
 mod lapack;
 mod sun_lswt;
 
@@ -90,5 +93,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     classical::register(m)?;
     cpn::register(m)?;
     sun_lswt::register(m)?;
+    kpm::register(m)?;
     Ok(())
 }

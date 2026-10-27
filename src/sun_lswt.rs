@@ -68,8 +68,8 @@ struct MomentTerm {
 pub struct SunModel {
     l: usize,
     nop: usize,
-    d: usize,
-    n: usize,
+    pub(crate) d: usize,
+    pub(crate) n: usize,
     ms: Vec<usize>,
     offs: Vec<usize>,
     s0: Vec<C>,
@@ -85,7 +85,7 @@ pub struct SunModel {
     n_cells: f64,
 }
 
-fn perr(msg: impl Into<String>) -> PyErr {
+pub(crate) fn perr(msg: impl Into<String>) -> PyErr {
     PyValueError::new_err(msg.into())
 }
 
@@ -117,7 +117,7 @@ impl SunModel {
     }
 
     /// g H2(q), row major (2D x 2D), into `h` (overwritten).
-    fn build_h(&self, q: [f64; 3], h: &mut [C]) {
+    pub(crate) fn build_h(&self, q: [f64; 3], h: &mut [C]) {
         let (n, d) = (self.n, self.d);
         for z in h.iter_mut() {
             *z = ZERO;
@@ -190,7 +190,7 @@ impl SunModel {
 
     /// The one-magnon observable v (3 x 2D) in the Nambu basis, column major with
     /// leading dimension 3 (so that v[a, k] sits at k * 3 + a).
-    fn observable(&self, q: [f64; 3], v: &mut [C]) {
+    pub(crate) fn observable(&self, q: [f64; 3], v: &mut [C]) {
         let d = self.d;
         for z in v.iter_mut() {
             *z = ZERO;
@@ -258,7 +258,7 @@ impl SunModel {
 
 /// Run `f` over `nq` items with rayon, capping the pool so that at most
 /// `budget / per_item` tasks run at once (the per-q matrices are large).
-fn capped_pool<T: Send>(n_workers: Option<usize>, per_item_bytes: usize,
+pub(crate) fn capped_pool<T: Send>(n_workers: Option<usize>, per_item_bytes: usize,
                         f: impl FnOnce() -> T + Send) -> PyResult<T> {
     let budget: usize = 3 << 30; // 3 GB of scratch in flight
     let cap = (budget / per_item_bytes.max(1)).max(1);
@@ -271,7 +271,7 @@ fn capped_pool<T: Send>(n_workers: Option<usize>, per_item_bytes: usize,
     }
 }
 
-fn qs_vec(qs: &PyReadonlyArray2<'_, f64>) -> PyResult<Vec<[f64; 3]>> {
+pub(crate) fn qs_vec(qs: &PyReadonlyArray2<'_, f64>) -> PyResult<Vec<[f64; 3]>> {
     let a = qs.as_array();
     if a.ncols() != 3 {
         return Err(perr(format!("qs must be (nq, 3), got {:?}", a.shape())));

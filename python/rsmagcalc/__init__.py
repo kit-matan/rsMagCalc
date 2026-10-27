@@ -16,7 +16,8 @@ __version__ = "0.1.0"
 __all__ = ["backend", "build_info", "describe", "classical_energy",
            "Rng", "move_energy_change", "sweep", "parallel_tempering", "evolve",
            "langevin", "wang_landau", "sampled_trajectories", "CpnModel",
-           "SunModel", "NotPositiveDefinite"]
+           "SunModel", "NotPositiveDefinite", "kpm_start_vector", "kpm_moments",
+           "spectral_bound"]
 
 try:
     from . import _core
@@ -504,5 +505,75 @@ class SunModel:
 
         return np.asarray(self._m.stable(self._qs(qs), float(shift), n_workers), dtype=bool)
 
+    def kpm_moments(self, qs, n_moments=None, gammas=None, fwhm=None, tol=None,
+                    n_iter=40, pad=1.15, seed=0, sparse=None, n_workers=None):
+        """KPM over a q batch, H(q) built inside (K4): `(gamma_raw (nq,),
+        n_moments (nq,), moments (nq, M_max, 3, 3))`, each q's moments zero past
+        its own count.
+
+        `gammas` fixes the bound per q, else it is `spectral_bound` from NumPy's
+        start vector for `seed`. `n_moments` fixes the count, else it is
+        `sun.kpm`'s rule from `fwhm` and `tol`. `gamma_raw` is the bound BEFORE
+        the Goldstone substitution (<= 0 or non-finite -> 1), so the caller can
+        say so. `sparse`: None picks CSR when H(q) is at most a quarter full.
+        """
+        import numpy as np
+
+        qs = self._qs(qs)
+        x0 = None
+        if gammas is not None:
+            gammas = np.ascontiguousarray(gammas, dtype=np.float64).reshape(-1)
+        else:
+            x0 = kpm_start_vector(2 * self.D, seed)
+        rule = None
+        if n_moments is None:
+            if fwhm is None or tol is None:
+                raise ValueError("kpm_moments needs n_moments, or fwhm and tol")
+            # The two factors of sun.kpm's rule, computed as it computes them.
+            rule = (0.5 * fwhm, float(-np.log10(tol)))
+        else:
+            n_moments = int(n_moments)
+        return _core.kpm_batch(self._m, qs, x0, gammas, n_moments, rule, int(n_iter),
+                               float(pad), sparse, n_workers)
+
     def __repr__(self):
         return repr(self._m)
+
+
+# --------------------------------------------------------------------------
+# K4: the KPM Chebyshev recursion and its spectral bound
+# --------------------------------------------------------------------------
+# Mirrors pyMagCalc `sun/kpm.py` (the moment loop of `kpm_sqw` and
+# `spectral_bound`) and is pinned to it in tests/test_kpm_parity.py. The batch
+# entry point is `SunModel.kpm_moments`; these two take an already-built g H2.
+
+def kpm_start_vector(n, seed=0):
+    """`sun.kpm.spectral_bound`'s start vector, drawn exactly as it draws it
+    (NumPy's generator), so the Rust bound iterates from the same point."""
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    x = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+    x /= np.linalg.norm(x)
+    return np.ascontiguousarray(x, dtype=np.complex128)
+
+
+def kpm_moments(HMat, v, n_moments, gamma, sparse=None):
+    """mu_m^{ab} = v_a^H T_m(conj(HMat)/gamma) g v_b: (n_moments, 3, 3) complex.
+    `v` is the (3, 2D) observable of `sun.kpm._observable_vectors`."""
+    import numpy as np
+
+    _need_core()
+    return _core.kpm_moments(np.ascontiguousarray(HMat, dtype=np.complex128),
+                             np.ascontiguousarray(v, dtype=np.complex128),
+                             int(n_moments), float(gamma), sparse)
+
+
+def spectral_bound(HMat, n_iter=40, pad=1.15, seed=0, sparse=None):
+    """pad * sqrt(lambda_max(HMat^H HMat)) by power iteration (`sun.kpm.spectral_bound`)."""
+    import numpy as np
+
+    _need_core()
+    H = np.ascontiguousarray(HMat, dtype=np.complex128)
+    return _core.spectral_bound(H, kpm_start_vector(H.shape[0], seed), int(n_iter),
+                                float(pad), sparse)
