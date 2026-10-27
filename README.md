@@ -133,4 +133,20 @@ shift = -min eig +- 1e-9 scale, the Goldstone zeros, Sunny's sigma = 1/3 refused
 a dense operator kept dense) and by forcing both paths in every guard case of
 `tests/test_sun_lswt_parity.py`. S09 L = 30: guard 38 -> 1.05 ms/q, a KPM q
 43 -> 7.6 ms (`pyMagCalc/GAP_STATUS.md`, "guard 3 on a SPARSE Cholesky").
-K5–K6 follow the plan.
+
+M5 (K5, `src/scga.rs`): the SCGA loops of pyMagCalc's `scga.py`. `ScgaModel` is
+packed once from `scga._exchange_cache` (directed bonds with Cartesian image
+offsets, positions, g-tensors, spins); `fourier(qs)` is `fourier_exchange_matrix`,
+`eigenvalues(mesh)` the J(q) spectrum `solve_lambda`'s root solve sums over
+(zheevd jobz N with the queried workspace, the call `eigvalsh` makes -- bit-identical,
+so lambda is too), `sum_rule_residuals(mesh, lam, kT)` the per-site check behind the
+inequivalent-sublattice refusal (Cholesky + ztrtri for the inverse's diagonal), and
+`correlations(qs, lam, kT, ff, apply_g)` the 3 x 3 tensors kT W^H (lam + J)^-1 W
+(Cholesky + zpotrs on 3 right-hand sides; NumPy's LU when lam + J(q) is
+indefinite). The root solve, the form factors (passed in per q and site) and the
+cross-section contraction stay in pyMagCalc. Pinned in `tests/test_scga_parity.py`
+(75 tests) at 1e-12 on the chain, square, square + DM, kagome, kagome with an
+anisotropic g and Cu2+ form factors, and a 16-site pyrochlore. That cell's
+`solve_lambda` 3.9 s -> 0.17 s, a 1681-q map 2.5 s -> 27 ms
+(`pyMagCalc/GAP_STATUS.md`, "Rust kernels K5").
+K6 (optional) follows the plan.
