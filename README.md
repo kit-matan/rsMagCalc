@@ -105,4 +105,19 @@ elementwise to 1e-13, energies and per-band tensors to 1e-10, T para-unitary and
 equal to NumPy's columns up to phase, the guard verdict by verdict on pyMagCalc's
 `test_kpm_stability` fixtures, mixed spin, the biquadratic operator set, a
 non-collinear and a disordered supercell, and the entangled dimer chain.
-K4–K6 follow the plan.
+
+M4 (K4, `src/kpm.rs`): the KPM Chebyshev recursion of pyMagCalc's `sun/kpm.py`
+(moments mu_m^{ab} = v_a^H T_m(conj(g H2)/gamma) g v_b) and its power-iteration
+spectral bound. `kpm_moments(HMat, v, M, gamma)` and `spectral_bound(HMat, ...)`
+take a matrix already built; `SunModel.kpm_moments(qs, ...)` runs a q batch in
+parallel with H(q) built inside by K3, so no 2D x 2D matrix crosses into Python.
+H(q) is scanned once per q into CSR when it is at most a quarter full (a supercell's
+is: 0.7 % at S09's L = 30), else multiplied with zgemm. The bound starts from
+NumPy's own start vector (drawn in the Python wrapper), and the moment count from
+`fwhm`/`tol` is pyMagCalc's integer. The Chebyshev coefficients, the +omega cutoff
+and the reconstruction stay in pyMagCalc. Pinned in `tests/test_kpm_parity.py`
+(63 tests): moments at 1e-12 at the same gamma, dense, CSR and auto, on every K3
+fixture plus 36- and 81-site non-collinear supercells; the bound; the chiral
+channel end to end; the Goldstone point. S09 L = 30 KPM: 1.4 s/q -> 43 ms/q with
+pyMagCalc's stability guard included (`pyMagCalc/GAP_STATUS.md`, "Rust kernels K4").
+K5–K6 follow the plan.
