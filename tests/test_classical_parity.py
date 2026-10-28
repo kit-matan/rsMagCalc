@@ -322,3 +322,105 @@ def test_each_trajectory_is_an_ll_evolution_of_its_own_start():
     for t in traj:
         want = cd.evolve(H, b, 1.0, t[0], 0.01, 40, record_every=2)
         assert np.abs(t - want).max() < 1e-12
+
+
+# --------------------------------------------------------------------------
+# Ground-state search: pyMagCalc `annealing.anneal` / `steepest_descent`
+# --------------------------------------------------------------------------
+ann = pytest.importorskip("magcalc.annealing",
+                          reason="pyMagCalc not installed (the parity oracle)")
+
+
+def _with_onsite(n, seed):
+    """A random problem with a large on-site block, where steepest descent is not
+    monotone and the keep-if-better rule matters."""
+    H, b = _random_problem(n, seed, scale=0.4)
+    rng = np.random.default_rng(seed + 100)
+    for i in range(n):
+        A = rng.standard_normal((3, 3))
+        H[3 * i:3 * i + 3, 3 * i:3 * i + 3] += 3.0 * 0.5 * (A + A.T)
+    return H, b
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_steepest_descent_matches_numpy(seed):
+    """Deterministic, so pinned number for number to the NumPy loop, with mixed
+    spins and an on-site block (the case where it can go uphill)."""
+    n = 7
+    H, b = _with_onsite(n, seed)
+    S = np.array([1.0, 0.5, 1.5, 1.0, 2.0, 0.5, 1.0])
+    m0 = ann.random_spins(n, S, np.random.default_rng(seed))
+    want_m, want_e = ann.steepest_descent(m0, H, b, 0.3, S, n)
+    got_m, got_e = rsmagcalc.steepest_descent(H, b, 0.3, S, m0.reshape(n, 3))
+    assert abs(got_e - want_e) < 1e-12 * max(1.0, abs(want_e))
+    assert np.abs(got_m.ravel() - want_m).max() < 1e-10
+    # max_iter is honoured the same way
+    want1 = ann.steepest_descent(m0, H, b, 0.3, S, n, max_iter=1)
+    got1 = rsmagcalc.steepest_descent(H, b, 0.3, S, m0.reshape(n, 3), max_iter=1)
+    assert abs(got1[1] - want1[1]) < 1e-12 * max(1.0, abs(want1[1]))
+
+
+def test_anneal_is_deterministic_and_batch_and_thread_independent():
+    n = 10
+    H, b = _random_problem(n, 31, scale=1.0)
+    S = np.linspace(0.5, 2.0, n)
+    kw = dict(n_sweeps=200, T_start=3.0, T_end=1e-4)
+    m_all, e_all = rsmagcalc.anneal(H, b, 0.0, S, seeds=[4, 9, 2], n_workers=3, **kw)
+    m_one, e_one = rsmagcalc.anneal(H, b, 0.0, S, seeds=[9], n_workers=1, **kw)
+    assert np.array_equal(m_all[1], m_one[0]) and e_all[1] == e_one[0]
+    m_again, e_again = rsmagcalc.anneal(H, b, 0.0, S, seeds=[4, 9, 2], n_workers=1, **kw)
+    assert np.array_equal(m_all, m_again) and np.array_equal(e_all, e_again)
+    assert not np.array_equal(m_all[0], m_all[2])          # independent streams
+    assert np.linalg.norm(m_all, axis=-1) == pytest.approx(np.tile(S, (3, 1)), abs=1e-12)
+    # the returned energy is the returned state's, recomputed from scratch
+    for m, e in zip(m_all, e_all):
+        assert abs(e - ann.energy(m.ravel(), H, b, 0.0)) < 1e-10
+
+
+def test_anneal_starts_from_m0_and_polishes_like_steepest_descent():
+    """No sweeps, no polish: the start comes back untouched. No sweeps WITH the
+    polish: the steepest-descent result from that start, kept only if it is lower.
+    Only run 0 takes m0."""
+    n = 5
+    H, b = _with_onsite(n, 7)
+    S = 1.0
+    m0 = _random_state(n, S, 3)
+    m, e = rsmagcalc.anneal(H, b, 0.1, S, n_sweeps=0, T_start=1.0, T_end=1.0,
+                            seeds=[0, 1], m0=m0, polish=False)
+    assert np.array_equal(m[0], m0)
+    assert not np.array_equal(m[1], m0)
+    assert abs(e[0] - ann.energy(m0.ravel(), H, b, 0.1)) < 1e-12
+    m, e = rsmagcalc.anneal(H, b, 0.1, S, n_sweeps=0, T_start=1.0, T_end=1.0,
+                            seeds=[0], m0=m0, polish=True)
+    sm, se = ann.steepest_descent(m0.ravel(), H, b, 0.1, S, n)
+    e0 = ann.energy(m0.ravel(), H, b, 0.1)
+    want = min(se, e0)
+    assert abs(e[0] - want) < 1e-12 * max(1.0, abs(want))
+
+
+def test_anneal_finds_the_closed_triangle_of_a_mixed_spin_trimer():
+    """Exact: E = -(J/2) sum |m_i|^2 when the moment triangle closes."""
+    H = np.zeros((9, 9))
+    for i, j in ((0, 1), (1, 2), (2, 0)):
+        for (p, q) in ((i, j), (j, i)):
+            H[3 * p:3 * p + 3, 3 * q:3 * q + 3] = np.eye(3)
+    S = np.array([1.0, 1.0, 0.5])
+    m, e = rsmagcalc.anneal(H, np.zeros(9), 0.0, S, n_sweeps=4000, T_start=2.0,
+                            T_end=2e-6, seeds=list(range(8)))
+    assert e.min() == pytest.approx(-0.5 * np.sum(S ** 2), abs=1e-6)
+    # The Metropolis loop ALONE (no steepest-descent polish to rescue it) must
+    # reach the same closed form on every run, not just the best one.
+    m, e = rsmagcalc.anneal(H, np.zeros(9), 0.0, S, n_sweeps=4000, T_start=2.0,
+                            T_end=2e-6, seeds=list(range(8)), polish=False)
+    assert np.max(np.abs(e + 0.5 * np.sum(S ** 2))) < 1e-4
+
+
+def test_anneal_refuses_bad_input():
+    H, b = _random_problem(3, 0)
+    with pytest.raises(ValueError, match="positive"):
+        rsmagcalc.anneal(H, b, 0.0, 1.0, n_sweeps=10, T_start=0.0, T_end=1.0, seeds=[0])
+    with pytest.raises(ValueError, match="seeds"):
+        rsmagcalc.anneal(H, b, 0.0, 1.0, n_sweeps=10, T_start=1.0, T_end=1.0, seeds=[])
+    with pytest.raises(ValueError, match="m0"):
+        rsmagcalc.anneal(H, b, 0.0, 1.0, n_sweeps=10, T_start=1.0, T_end=1.0, seeds=[0],
+                         m0=np.zeros((2, 3)))

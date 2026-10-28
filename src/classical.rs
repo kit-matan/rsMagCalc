@@ -1,6 +1,7 @@
 //! K1 -- the classical Metropolis sweep and the Landau-Lifshitz integrator.
 //!
-//! Replaces, in pyMagCalc: `thermal_mc._sweep` (uniform and flip proposals), the
+//! Replaces, in pyMagCalc: `thermal_mc._sweep` (uniform and flip proposals),
+//! `annealing.anneal` and `annealing.steepest_descent` (the ground-state search), the
 //! sweep/swap loop of `thermal_mc.parallel_tempering`, the move loop of
 //! `thermal_mc.wang_landau`, `classical_dynamics.evolve` (rk4 and implicit
 //! midpoint), `classical_dynamics.langevin_step`, and the outer trajectory loop
@@ -593,6 +594,226 @@ pub fn sweep(
     Ok(py.detach(move || sweep_impl(&d, ms, gs, beta, ss, r, flip, &mut order)))
 }
 
+// --------------------------------------------------------------------------
+// Ground-state search: pyMagCalc `annealing.anneal` and `annealing.steepest_descent`
+// --------------------------------------------------------------------------
+//
+// Same dense model, same move energy and same accept/update as the sweep above;
+// what differs is the move loop, which is `anneal`'s, not `thermal_mc._sweep`'s:
+// a site drawn WITH replacement n times per temperature step, Sunny's
+// `LocalSampler` proposal mix (uniform 0.5, flip 0.1, delta 0.4), the delta width
+// adapted toward 50 % acceptance after every step, a geometric schedule from t0
+// to t1, and the best state seen kept. Energies here include the constant `c`,
+// exactly as `annealing.energy` does, so the tolerances compare like with like.
+
+/// SpinW `optmagsteep`, `annealing.steepest_descent`: align each spin with the
+/// field from everything except itself, sweep after sweep, keeping the best state
+/// seen (the step ignores H_ii, so it can go uphill). Deterministic.
+fn steepest_impl(d: &Dense<'_>, c: f64, s: &[f64], m: &mut [f64], max_iter: usize,
+                 tol: f64) -> (Vec<f64>, f64) {
+    let n = d.n();
+    let n3 = d.n3;
+    let mut g = vec![0.0; n3];
+    let mut e_prev = d.energy(m) + c;
+    let mut m_best = m.to_vec();
+    let mut e_best = e_prev;
+    for _ in 0..max_iter {
+        d.gradient(m, &mut g);
+        for i in 0..n {
+            let k = 3 * i;
+            let mut h = [0.0; 3];
+            for a in 0..3 {
+                let row = &d.h[(k + a) * n3..(k + a + 1) * n3];
+                h[a] = g[k + a] - (row[k] * m[k] + row[k + 1] * m[k + 1] + row[k + 2] * m[k + 2]);
+            }
+            let norm = (h[0] * h[0] + h[1] * h[1] + h[2] * h[2]).sqrt();
+            if norm < 1e-12 {
+                continue;
+            }
+            let v = [-s[i] * h[0] / norm, -s[i] * h[1] / norm, -s[i] * h[2] / norm];
+            d.apply_move(m, &mut g, i, v);
+        }
+        let e = d.energy(m) + c;
+        if e < e_best {
+            m_best.copy_from_slice(m);
+            e_best = e;
+        }
+        if (e_prev - e).abs() < tol {
+            break;
+        }
+        e_prev = e;
+    }
+    (m_best, e_best)
+}
+
+/// One annealing run from `m` (already a valid state): returns the best state and
+/// its energy RECOMPUTED from scratch (the running sum drifts over ~n_sweeps*N
+/// moves), then the steepest-descent polish if it lowers that energy.
+#[allow(clippy::too_many_arguments)]
+fn anneal_impl(d: &Dense<'_>, c: f64, s: &[f64], m: &mut [f64], n_sweeps: usize, t0: f64,
+               t1: f64, rng: &mut Pcg64, polish: bool, max_iter: usize,
+               tol: f64) -> (Vec<f64>, f64) {
+    let n = d.n();
+    let n3 = d.n3;
+    let cooling = (t1 / t0).powf(1.0 / (n_sweeps.saturating_sub(1).max(1)) as f64);
+    let mut g = vec![0.0; n3];
+    d.gradient(m, &mut g);
+    let mut e = d.energy(m) + c;
+    let mut m_best = m.to_vec();
+    let mut e_best = e;
+    let mut sigma = 0.6_f64;
+    let mut t = t0;
+    for _ in 0..n_sweeps {
+        let mut accepted = 0usize;
+        let mut attempted = 0usize;
+        for _ in 0..n {
+            let i = rng.random_range(0..n);
+            let k = 3 * i;
+            let old = [m[k], m[k + 1], m[k + 2]];
+            let u: f64 = rng.random();
+            let v = if u < 0.5 {
+                random_unit(rng, s[i])
+            } else if u < 0.6 {
+                [-old[0], -old[1], -old[2]]
+            } else {
+                let w = [
+                    old[0] + sigma * s[i] * rng.sample::<f64, _>(StandardNormal),
+                    old[1] + sigma * s[i] * rng.sample::<f64, _>(StandardNormal),
+                    old[2] + sigma * s[i] * rng.sample::<f64, _>(StandardNormal),
+                ];
+                let nv = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt();
+                if nv < 1e-12 {
+                    continue;
+                }
+                [s[i] * w[0] / nv, s[i] * w[1] / nv, s[i] * w[2] / nv]
+            };
+            let de = d.move_delta(m, &g, i, v);
+            attempted += 1;
+            if de <= 0.0 || rng.random::<f64>() < (-de / t).exp() {
+                d.apply_move(m, &mut g, i, v);
+                e += de;
+                accepted += 1;
+                if e < e_best {
+                    e_best = e;
+                    m_best.copy_from_slice(m);
+                }
+            }
+        }
+        if attempted > 0 {
+            let rate = accepted as f64 / attempted as f64;
+            sigma = (sigma * if rate > 0.5 { 1.2 } else { 0.8 }).clamp(1e-3, 2.0);
+        }
+        t *= cooling;
+    }
+    let mut e_best = d.energy(&m_best) + c;
+    if polish {
+        let mut start = m_best.clone();
+        let (m_pol, e_pol) = steepest_impl(d, c, s, &mut start, max_iter, tol);
+        if e_pol < e_best {
+            m_best = m_pol;
+            e_best = e_pol;
+        }
+    }
+    (m_best, e_best)
+}
+
+/// `annealing.anneal` for several independent runs at once: run r uses the stream
+/// derived from `seeds[r]` and starts from `m0` if r == 0 and one is given, else
+/// from a random state drawn from its own stream. Runs execute in parallel (rayon);
+/// each owns its stream, so the result does not depend on the thread count, and a
+/// one-seed call reproduces the same run inside a batch. Returns (m_best (R, N, 3),
+/// e_best (R,)).
+#[pyfunction]
+#[pyo3(signature = (h, b, c, s, n_sweeps, t0, t1, seeds, m0 = None, polish = true,
+                    max_iter = 500, tol = 1e-10, n_workers = None))]
+#[allow(clippy::too_many_arguments)]
+pub fn anneal<'py>(
+    py: Python<'py>,
+    h: PyReadonlyArray2<'py, f64>,
+    b: PyReadonlyArray1<'py, f64>,
+    c: f64,
+    s: PyReadonlyArray1<'py, f64>,
+    n_sweeps: usize,
+    t0: f64,
+    t1: f64,
+    seeds: Vec<u64>,
+    m0: Option<PyReadonlyArray2<'py, f64>>,
+    polish: bool,
+    max_iter: usize,
+    tol: f64,
+    n_workers: Option<usize>,
+) -> PyResult<(Bound<'py, PyArray3<f64>>, Bound<'py, PyArray1<f64>>)> {
+    let d = dense(&h, &b)?;
+    let n = d.n();
+    let n3 = d.n3;
+    let ss = check_spins(&s, n)?;
+    if !(t0 > 0.0) || !(t1 > 0.0) {
+        return Err(PyValueError::new_err("t0 and t1 must be positive"));
+    }
+    if seeds.is_empty() {
+        return Err(PyValueError::new_err("seeds must not be empty"));
+    }
+    let start: Option<Vec<f64>> = match &m0 {
+        Some(a) => {
+            check_m(a.shape(), n, "m0")?;
+            Some(a.as_array().iter().copied().collect())
+        }
+        None => None,
+    };
+    let nr = seeds.len();
+    let out = py.detach(move || -> PyResult<Vec<(Vec<f64>, f64)>> {
+        with_pool(n_workers, move || {
+            (0..nr)
+                .into_par_iter()
+                .map(|r| {
+                    let mut rng = stream(seeds[r], 0);
+                    let mut m = vec![0.0; n3];
+                    match (&start, r) {
+                        (Some(m0), 0) => m.copy_from_slice(m0),
+                        _ => random_state(&mut rng, ss, &mut m),
+                    }
+                    anneal_impl(&d, c, ss, &mut m, n_sweeps, t0, t1, &mut rng, polish,
+                                max_iter, tol)
+                })
+                .collect()
+        })
+    })?;
+    let mut ms = Vec::with_capacity(nr * n3);
+    let mut es = Vec::with_capacity(nr);
+    for (m, e) in out {
+        ms.extend_from_slice(&m);
+        es.push(e);
+    }
+    let arr = Array3::from_shape_vec((nr, n, 3), ms)
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    Ok((arr.into_pyarray(py), es.into_pyarray(py)))
+}
+
+/// `annealing.steepest_descent` from `m0` (N, 3): returns (m_best (N, 3), e_best).
+#[pyfunction]
+#[pyo3(signature = (h, b, c, s, m0, max_iter = 500, tol = 1e-10))]
+#[allow(clippy::too_many_arguments)]
+pub fn steepest_descent<'py>(
+    py: Python<'py>,
+    h: PyReadonlyArray2<'py, f64>,
+    b: PyReadonlyArray1<'py, f64>,
+    c: f64,
+    s: PyReadonlyArray1<'py, f64>,
+    m0: PyReadonlyArray2<'py, f64>,
+    max_iter: usize,
+    tol: f64,
+) -> PyResult<(Bound<'py, PyArray2<f64>>, f64)> {
+    let d = dense(&h, &b)?;
+    let n = d.n();
+    let ss = check_spins(&s, n)?;
+    check_m(m0.shape(), n, "m0")?;
+    let mut m: Vec<f64> = m0.as_array().iter().copied().collect();
+    let (mb, eb) = py.detach(move || steepest_impl(&d, c, ss, &mut m, max_iter, tol));
+    let arr = Array2::from_shape_vec((n, 3), mb)
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    Ok((arr.into_pyarray(py), eb))
+}
+
 /// Replica-exchange Metropolis over a temperature ladder -- the whole
 /// sweep/swap/measure loop of pyMagCalc `parallel_tempering`, returning the raw
 /// sums it accumulates: (sumE, sumE2, sumM (R, 3), sumM2, n_meas, accept_rate).
@@ -1000,6 +1221,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(move_energy_change, m)?)?;
     m.add_function(wrap_pyfunction!(sweep, m)?)?;
     m.add_function(wrap_pyfunction!(parallel_tempering, m)?)?;
+    m.add_function(wrap_pyfunction!(anneal, m)?)?;
+    m.add_function(wrap_pyfunction!(steepest_descent, m)?)?;
     m.add_function(wrap_pyfunction!(evolve, m)?)?;
     m.add_function(wrap_pyfunction!(langevin, m)?)?;
     m.add_function(wrap_pyfunction!(wang_landau, m)?)?;

@@ -14,7 +14,8 @@ from __future__ import annotations
 
 __version__ = "0.1.0"
 __all__ = ["backend", "build_info", "describe", "classical_energy",
-           "Rng", "move_energy_change", "sweep", "parallel_tempering", "evolve",
+           "Rng", "move_energy_change", "sweep", "parallel_tempering", "anneal",
+           "steepest_descent", "evolve",
            "langevin", "wang_landau", "sampled_trajectories", "CpnModel",
            "SunModel", "NotPositiveDefinite", "kpm_start_vector", "kpm_moments",
            "spectral_bound", "ScgaModel"]
@@ -187,6 +188,38 @@ def parallel_tempering(H, b, S, temperatures, n_sweeps, n_equil, swap_every=1,
         int(seed), None if n_workers is None else int(n_workers))
     return {"sumE": sE, "sumE2": sE2, "sumM": sM, "sumM2": sM2,
             "n_meas": int(nmeas), "accept_rate": float(rate)}
+
+
+def anneal(H, b, c, S, n_sweeps, T_start, T_end, seeds, m0=None, polish=True,
+           max_iter=500, tol=1e-10, n_workers=None):
+    """pyMagCalc `annealing.anneal` for one or several runs at once.
+
+    Run r draws from the stream of `seeds[r]` and starts from `m0` (N, 3) when
+    r == 0 and one is given, else from a random state. The schedule, proposal mix,
+    best-state tracking and keep-if-better steepest-descent polish are
+    `annealing.anneal`'s. Runs execute in parallel (`n_workers`, None = all cores);
+    a run's result does not depend on the thread count or on the other seeds.
+    Returns (m_best (R, N, 3), e_best (R,)), e_best including `c`."""
+    _need_core()
+    import numpy as np
+
+    H, b, n = _hb(H, b)
+    seeds = [int(x) for x in np.atleast_1d(seeds)]
+    m0 = None if m0 is None else _f64(np.asarray(m0, dtype=np.float64).reshape(-1, 3))
+    return _core.anneal(H, b, float(c), _spins(S, n), int(n_sweeps), float(T_start),
+                        float(T_end), seeds, m0, bool(polish), int(max_iter),
+                        float(tol), None if n_workers is None else int(n_workers))
+
+
+def steepest_descent(H, b, c, S, m0, max_iter=500, tol=1e-10):
+    """pyMagCalc `annealing.steepest_descent` (deterministic): (m_best (N, 3), e_best)."""
+    _need_core()
+    import numpy as np
+
+    H, b, n = _hb(H, b)
+    m0 = _f64(np.asarray(m0, dtype=np.float64).reshape(-1, 3))
+    return _core.steepest_descent(H, b, float(c), _spins(S, n), m0, int(max_iter),
+                                  float(tol))
 
 
 def evolve(H, b, S, m0, dt, n_steps, record_every=1, integrator="rk4"):

@@ -2,11 +2,11 @@
 
 Rust kernels, behind PyO3, for the loops in pyMagCalc that are Python-bound per
 site or per q: the classical Metropolis sweep and Landau–Lifshitz integrator, the
-CP^(N−1) sampler, SU(N) LSWT assembly and Bogoliubov diagonalization, the KPM
+annealing ground-state search, the CP^(N−1) sampler, SU(N) LSWT assembly and Bogoliubov diagonalization, the KPM
 Chebyshev recursion, and SCGA. What each kernel covers, the oracle it is pinned to and
 its measured speed-up are recorded in pyMagCalc's
 [`GAP_STATUS.md`](https://github.com/kit-matan/pyMagCalc/blob/master/GAP_STATUS.md)
-under "Rust kernels K1" to "K5". This is **not** a port of pyMagCalc: the config,
+under "Rust kernels K1" to "K5" and "anneal on K1's dense model". This is **not** a port of pyMagCalc: the config,
 symmetry, symbolic model builder, runner, fitting and plotting stay in Python, and
 the dipole LSWT hot path stays with [fMagCalc](https://github.com/kit-matan/fMagCalc).
 New to MagCalc? Start with pyMagCalc's
@@ -81,6 +81,17 @@ to 1e-12 (measured 2e-16) over 50 rk4 and 50 midpoint steps, the single-move dE
 equals E(after) − E(before) to 1e-12, plus the exact classical-dimer thermodynamics
 and the Langevin function. pyMagCalc selects it with `calculation: {kernels: rust}`
 and runs its own oracle tests under both kernel sets.
+
+The ground-state search (2026-10-28) runs on the same dense model and move
+primitives: `anneal` is pyMagCalc's `annealing.anneal` (a site drawn with
+replacement, Sunny's `LocalSampler` uniform/flip/delta proposal mix with the adaptive
+delta width, a geometric schedule, the best state kept, then the keep-if-better
+steepest-descent polish), for several independent runs at once in parallel (run r
+owns the stream of `seeds[r]`, so a batch reproduces the per-seed calls whatever the
+thread count). `steepest_descent` is `annealing.steepest_descent`, deterministic and
+matched to it to 1e-12 with mixed spins and a large on-site block. Pinned in
+`tests/test_classical_parity.py`, including the mixed-spin trimer's closed-triangle
+energy reached by the Metropolis loop alone, with the polish off.
 
 M2 (K2, `src/cpn.rs`, `rsmagcalc.CpnModel`): the CP^(N−1) Metropolis sampler for
 SU(N) coherent states with pyMagCalc's adaptive step size (`thermalize`, returning
