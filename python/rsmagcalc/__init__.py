@@ -18,7 +18,8 @@ __all__ = ["backend", "build_info", "describe", "classical_energy",
            "steepest_descent", "evolve",
            "langevin", "wang_landau", "sampled_trajectories", "CpnModel",
            "SunModel", "NotPositiveDefinite", "kpm_start_vector", "kpm_moments",
-           "spectral_bound", "ScgaModel"]
+           "spectral_bound", "ScgaModel", "block_effective_series",
+           "cluster_pt_batch"]
 
 try:
     from . import _core
@@ -707,3 +708,70 @@ class ScgaModel:
 
     def __repr__(self):
         return repr(self._m)
+
+
+# --------------------------------------------------------------------------
+# K7: the per-cluster perturbation theory of the dimer series expansion
+# --------------------------------------------------------------------------
+# Mirrors pyMagCalc `sun/dimer_series.py` (`block_effective_series` and
+# `_cluster_pt`) and is pinned to it in tests/test_dimer_series_parity.py. The
+# cluster enumeration, the isomorphism keys, the linked-cluster subtraction and
+# the resummation stay in pyMagCalc.
+
+def _csr_triplet(V, n):
+    """(indptr, indices, data) of an n x n matrix: dense (exact zeros dropped) or
+    anything with `.tocsr()` (scipy.sparse; duplicates summed)."""
+    import numpy as np
+
+    if hasattr(V, "tocsr"):
+        c = V.tocsr(copy=True)
+        c.sum_duplicates()
+        if c.shape != (n, n):
+            raise ValueError(f"V is {c.shape}, H0 is ({n}, {n})")
+        return (np.ascontiguousarray(c.indptr, dtype=np.int64),
+                np.ascontiguousarray(c.indices, dtype=np.int64),
+                np.ascontiguousarray(c.data, dtype=np.complex128))
+    A = np.asarray(V, dtype=np.complex128)
+    if A.shape != (n, n):
+        raise ValueError(f"V is {A.shape}, H0 is ({n}, {n})")
+    rows, cols = np.nonzero(A)
+    indptr = np.zeros(n + 1, dtype=np.int64)
+    np.cumsum(np.bincount(rows, minlength=n), out=indptr[1:])
+    return (indptr, np.ascontiguousarray(cols, dtype=np.int64),
+            np.ascontiguousarray(A[rows, cols]))
+
+
+def block_effective_series(E0, V_list, P_idx, order):
+    """[H_eff_0 .. H_eff_order] (each p x p) for H(lambda) = diag(E0) + sum_j
+    V_list[j-1] lambda^j and the model space P_idx (pyMagCalc
+    `sun.dimer_series.block_effective_series`). Each V is dense or scipy sparse."""
+    import numpy as np
+
+    _need_core()
+    E0 = _f64(np.asarray(E0, dtype=np.float64).ravel())
+    vs = [_csr_triplet(V, len(E0)) for V in V_list]
+    H = _core.block_effective_series(E0, vs, [int(i) for i in P_idx], int(order))
+    return list(H)
+
+
+def cluster_pt_batch(clusters, order, n_workers=None):
+    """pyMagCalc `sun.dimer_series._cluster_pt` for many clusters, in parallel.
+
+    `clusters`: iterable of (levels_list, links_local, sz_list) exactly as
+    `_cluster_pt` takes them -- per-node local energies (nloc,), links
+    [(pa, pb, V (nloc^2, nloc^2))] with V on the index sa*nloc + sb of node pa
+    first, and per-node level Sz (nloc,) or None. Returns [(gs_int (order+1,),
+    delta_int (order+1, p, p))] in the same order.
+    """
+    import numpy as np
+
+    _need_core()
+    packed = []
+    for levels_list, links_local, sz_list in clusters:
+        lv = _f64(np.array([np.asarray(l, dtype=np.float64) for l in levels_list]))
+        links = [(int(pa), int(pb), np.ascontiguousarray(V, dtype=np.complex128))
+                 for (pa, pb, V) in links_local]
+        sz = (None if sz_list is None else
+              _f64(np.array([np.asarray(s, dtype=np.float64) for s in sz_list])))
+        packed.append((lv, links, sz))
+    return _core.cluster_pt_batch(packed, int(order), n_workers)

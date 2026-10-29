@@ -12,7 +12,9 @@
 //! recursion and its power-iteration bound, on H(q) from K3's builder, sparse
 //! when H(q) is). M5: `scga` (K5, the SCGA Fourier exchange matrix, its mesh
 //! eigenvalues, the per-site sum-rule traces and the diffuse-S(q) correlation
-//! tensors). The order and the oracles are in ../RUST_KERNELS_PLAN.md.
+//! tensors). K7: `dimer_series` (the per-cluster Bloch / des Cloizeaux
+//! perturbation theory of pyMagCalc's dimer series expansion). The order and the
+//! oracles are in ../RUST_KERNELS_PLAN.md.
 //!
 //! Conventions shared with the Python side, and never to be re-derived here:
 //!   * the classical energy is E = 1/2 m^T H m + b^T m with H the (3N x 3N)
@@ -20,6 +22,7 @@
 //!   * m is (N, 3) row-major, flattened exactly as NumPy's `ravel()` does.
 mod classical;
 mod cpn;
+mod dimer_series;
 mod kpm;
 mod lapack;
 mod scga;
@@ -95,6 +98,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(classical_energy, m)?)?;
     classical::register(m)?;
     cpn::register(m)?;
+    dimer_series::register(m)?;
     sun_lswt::register(m)?;
     kpm::register(m)?;
     scga::register(m)?;

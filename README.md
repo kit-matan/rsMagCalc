@@ -3,10 +3,11 @@
 Rust kernels, behind PyO3, for the loops in pyMagCalc that are Python-bound per
 site or per q: the classical Metropolis sweep and Landau–Lifshitz integrator, the
 annealing ground-state search, the CP^(N−1) sampler, SU(N) LSWT assembly and Bogoliubov diagonalization, the KPM
-Chebyshev recursion, and SCGA. What each kernel covers, the oracle it is pinned to and
+Chebyshev recursion, SCGA, and the per-cluster perturbation theory of the dimer series
+expansion. What each kernel covers, the oracle it is pinned to and
 its measured speed-up are recorded in pyMagCalc's
 [`GAP_STATUS.md`](https://github.com/kit-matan/pyMagCalc/blob/master/GAP_STATUS.md)
-under "Rust kernels K1" to "K5" and "anneal on K1's dense model". This is **not** a port of pyMagCalc: the config,
+under "Rust kernels K1" to "K5", "anneal on K1's dense model" and "Rust kernels K7". This is **not** a port of pyMagCalc: the config,
 symmetry, symbolic model builder, runner, fitting and plotting stay in Python, and
 the dipole LSWT hot path stays with [fMagCalc](https://github.com/kit-matan/fMagCalc).
 New to MagCalc? Start with pyMagCalc's
@@ -174,5 +175,23 @@ anisotropic g and Cu2+ form factors, and a 16-site pyrochlore. That cell's
 (`pyMagCalc/GAP_STATUS.md`, "Rust kernels K5").
 K6, the mixed-spin dipole S(Q,ω), did not come here. The dipole path is fMagCalc's,
 and fMagCalc lacked only the per-site √(S_i/2) prefactor, so it went there instead
-(fMagCalc `eae20e3`; pyMagCalc `GAP_STATUS.md`, "K6"). That completes the plan:
-the work here is K1–K5 plus the sparse guard.
+(fMagCalc `eae20e3`; pyMagCalc `GAP_STATUS.md`, "K6"). That completed the plan:
+the work here was K1–K5 plus the sparse guard.
+
+K7 (`src/dimer_series.rs`, 2026-10-29) came after it, from a profile of every
+shipped example under the compiled kernels: the dimer series expansion
+(`sun/dimer_series.py`) was the one loop left that was Python-bound. Two functions:
+`block_effective_series(E0, V_list, P_idx, order)` is pyMagCalc's Bloch recursion
+with column-dependent resolvents plus the des Cloizeaux Hermitization (each V dense
+or scipy-sparse, passed as CSR), and `cluster_pt_batch(clusters, order, n_workers)`
+is `_cluster_pt` for a list of clusters, rayon over the clusters: the pair operators
+embedded into the nloc^m product space, the ground state and each one-particle
+total-Sz sector run separately when the local bases carry Sz, the interaction parts
+returned. The enumeration, isomorphism keys, linked-cluster subtraction and
+Dlog-Padé stay in pyMagCalc. The arithmetic is the NumPy code's term by term, with
+three savings that change no number (V·Ω_m computed once, Ω_0 as a row gather, the
+Gram terms of S_k and M_k summed in adjoint pairs). Pinned in
+`tests/test_dimer_series_parity.py` at 1e-12 on random quasi-degenerate,
+multi-order and sparse PT problems, and on the alternating chain's, Rb2Cu3SnF12's
+and random nloc = 3 clusters, with and without sectors (`pyMagCalc/GAP_STATUS.md`,
+"Rust kernels K7").
