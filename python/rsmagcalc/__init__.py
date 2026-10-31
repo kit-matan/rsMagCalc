@@ -19,7 +19,7 @@ __all__ = ["backend", "build_info", "describe", "classical_energy",
            "langevin", "wang_landau", "sampled_trajectories", "CpnModel",
            "SunModel", "NotPositiveDefinite", "kpm_start_vector", "kpm_moments",
            "spectral_bound", "ScgaModel", "block_effective_series",
-           "cluster_pt_batch", "scratch_budget"]
+           "cluster_pt_batch", "scratch_budget", "DipoleHq"]
 
 try:
     from . import _core
@@ -794,3 +794,98 @@ def scratch_budget(gb=None):
     /proc/meminfo MemAvailable and every cgroup's limit minus usage); 3 GB."""
     _need_core()
     return tuple(_core.scratch_budget(None if gb is None else float(gb)))
+
+
+# --------------------------------------------------------------------------
+# K8: the dipole engine's H(q) = 2 g H2(q), built numerically
+# --------------------------------------------------------------------------
+# pyMagCalc `numeric_hq.HamiltonianTerms` resolves the terms into monomials in
+# the spin components with the spin model's own builders; this does the
+# Holstein-Primakoff algebra and the Fourier placement of `symbolic.gen_HM`.
+# Pinned entry by entry to SymPy's `HMat_sym` in pyMagCalc
+# tests/test_numeric_hq.py, and to closed forms in tests/test_dipole_hq.py.
+
+class DipoleHq:
+    """H(q) = sum_d M_d exp(i q.d) as a sparse bond model.
+
+    `n` cell sites; `pos_ouc` (n_ouc, 3) Cartesian positions with the cell first
+    and OUC site j an image of cell site j % n; `spins` (n,) spin lengths;
+    `rot` (n, 3, 3) the local-to-lab rotations (moment along local z);
+    `monomials` an iterable of (coef, ((site, comp), ...)) meaning
+    coef * prod S^comp_site, or the CSR arrays (coef, ptr, site, comp) directly.
+    Pickles as its entries, so it can be shipped to pool workers.
+    """
+
+    __slots__ = ("_m",)
+
+    def __init__(self, n, pos_ouc, spins, rot, monomials=None, csr=None):
+        import numpy as np
+
+        _need_core()
+        if csr is None:
+            coef, ptr, site, comp = [], [0], [], []
+            for c, factors in monomials:
+                coef.append(float(c))
+                for (j, a) in factors:
+                    site.append(int(j))
+                    comp.append(int(a))
+                ptr.append(len(site))
+            csr = (coef, ptr, site, comp)
+        coef, ptr, site, comp = csr
+        self._m = _core.DipoleHq(
+            int(n), _f64(np.asarray(pos_ouc).reshape(-1, 3)),
+            _f64(np.asarray(spins).reshape(-1)), _f64(rot),
+            _f64(np.asarray(coef).reshape(-1)), np.ascontiguousarray(ptr, dtype=np.int64),
+            np.ascontiguousarray(site, dtype=np.int64),
+            np.ascontiguousarray(comp, dtype=np.int64))
+
+    @classmethod
+    def from_entries(cls, n, dvec, bond, row, col, val):
+        import numpy as np
+
+        _need_core()
+        self = cls.__new__(cls)
+        self._m = _core.DipoleHq.from_entries(
+            int(n), _f64(np.asarray(dvec).reshape(-1, 3)),
+            np.ascontiguousarray(bond, dtype=np.int64),
+            np.ascontiguousarray(row, dtype=np.int64),
+            np.ascontiguousarray(col, dtype=np.int64),
+            np.ascontiguousarray(val, dtype=np.complex128))
+        return self
+
+    @property
+    def n(self):
+        return self._m.n
+
+    @property
+    def n_bonds(self):
+        return self._m.n_bonds
+
+    @property
+    def n_entries(self):
+        return self._m.n_entries
+
+    def entries(self):
+        """(dvec (nb, 3), bond, row, col, val): the nonzero entries of every M_d."""
+        return self._m.entries()
+
+    def bond_model(self):
+        """(dvec (nb, 3), Mb (nb, 2n, 2n)): fMagCalc `run_sqw_model`'s input."""
+        return self._m.bond_model()
+
+    def hamiltonians(self, qs, negate=False, n_workers=None):
+        """H(q) per q, (nq, 2n, 2n) complex; H(-q) with `negate`."""
+        import numpy as np
+
+        qs = np.ascontiguousarray(np.asarray(qs, dtype=np.float64).reshape(-1, 3))
+        return self._m.hamiltonians(qs, bool(negate), n_workers)
+
+    def __getstate__(self):
+        return (self._m.n,) + tuple(self._m.entries())
+
+    def __setstate__(self, state):
+        other = DipoleHq.from_entries(*state)
+        self._m = other._m
+
+    def __repr__(self):
+        return repr(self._m)

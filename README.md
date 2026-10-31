@@ -3,12 +3,13 @@
 Rust kernels, behind PyO3, for the loops in pyMagCalc that are Python-bound per
 site or per q: the classical Metropolis sweep and Landau–Lifshitz integrator, the
 annealing ground-state search, the CP^(N−1) sampler, SU(N) LSWT assembly and Bogoliubov diagonalization, the KPM
-Chebyshev recursion, SCGA, and the per-cluster perturbation theory of the dimer series
-expansion. What each kernel covers, the oracle it is pinned to and
+Chebyshev recursion, SCGA, the per-cluster perturbation theory of the dimer series
+expansion, and the dipole engine's LSWT matrix H(q) built numerically in place of its
+SymPy expansion. What each kernel covers, the oracle it is pinned to and
 its measured speed-up are recorded in pyMagCalc's
 [`GAP_STATUS.md`](https://github.com/kit-matan/pyMagCalc/blob/master/GAP_STATUS.md)
-under "Rust kernels K1" to "K5", "anneal on K1's dense model" and "Rust kernels K7". This is **not** a port of pyMagCalc: the config,
-symmetry, symbolic model builder, runner, fitting and plotting stay in Python, and
+under "Rust kernels K1" to "K5", "anneal on K1's dense model", "Rust kernels K7" and "Rust kernels K8". This is **not** a port of pyMagCalc: the config,
+symmetry, term resolution, runner, fitting and plotting stay in Python, and
 the dipole LSWT hot path stays with [fMagCalc](https://github.com/kit-matan/fMagCalc).
 New to MagCalc? Start with pyMagCalc's
 [`MAGCALC_GUIDE.md`](https://github.com/kit-matan/pyMagCalc/blob/master/MAGCALC_GUIDE.md).
@@ -205,6 +206,31 @@ which removes each one-particle state's vacuum component before orthonormalizing
 The same change was made in pyMagCalc's `_cluster_pt`. The other sectors are
 unchanged bit for bit (`pyMagCalc/GAP_STATUS.md`, "The dimer series' T0 sector made
 cluster additive").
+
+K8 (`src/dipole_hq.rs`, 2026-10-31) builds the dipole engine's LSWT matrix
+H(q) = 2 g H2(q) numerically, replacing pyMagCalc's SymPy Holstein–Primakoff build
+(`symbolic.gen_HM`; FeI₂ 35 s → 0.66 s, SW28 26 s → 0.6 s) under `calculation:
+{hamiltonian_builder: numeric}` or `auto`, its default. pyMagCalc
+(`numeric_hq.HamiltonianTerms`) resolves every term with the spin model's own
+builders into monomials in the spin components, coefficients evaluated for the
+current parameters. `DipoleHq(n, pos_ouc, spins, rot, monomials)` then does what
+`gen_HM` does symbolically: the HP expansion of each factor about its site's
+frame, truncated at boson degree 2 with no reordering, the Fourier placement of
+`gen_HM`'s lookup, and 2g. It returns a sparse bond model H(q) = Σ_d M_d e^{iq·d}
+with `hamiltonians(qs, negate)` (threaded over q), `bond_model()` (the dense form
+fMagCalc's `run_sqw_model` takes) and `entries()`. It pickles as its entries, so
+pyMagCalc's per-q process pools receive it directly. Two numerical details:
+- The √(S/2) of two one-boson factors is applied once, as √(S_a S_b)/2, when they
+  pair. √(S/2)² is not S/2 in floating point, and a collinear ferromagnet's H(0)
+  would otherwise come out 4e-16 instead of exactly 0.
+- Rows of the hole block are negated after assembly.
+
+Pinned in pyMagCalc `tests/test_numeric_hq.py` entry by entry to `HMat_sym` (≤ 5e-15
+relative on every buildable shipped dipole config, at random rotations, and on a
+triclinic mixed-spin model carrying every term), and here in `tests/test_dipole_hq.py`
+to closed forms: the ferromagnetic and Néel chains, an easy-plane ferromagnet's
+gapless mode, a Zeeman monomial, the collinear biquadratic's bilinear equivalent
+(pyMagCalc `GAP_STATUS.md`, "Rust kernels K8").
 
 ### Memory decides how many items run at once
 

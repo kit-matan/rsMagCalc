@@ -13,8 +13,10 @@
 //! when H(q) is). M5: `scga` (K5, the SCGA Fourier exchange matrix, its mesh
 //! eigenvalues, the per-site sum-rule traces and the diffuse-S(q) correlation
 //! tensors). K7: `dimer_series` (the per-cluster Bloch / des Cloizeaux
-//! perturbation theory of pyMagCalc's dimer series expansion). The order and the
-//! oracles are in ../RUST_KERNELS_PLAN.md.
+//! perturbation theory of pyMagCalc's dimer series expansion). K8: `dipole_hq`
+//! (the dipole engine's H(q) = 2 g H2(q) as a sparse bond model, from the
+//! monomials pyMagCalc resolves -- the numeric replacement for its SymPy build).
+//! The order and the oracles are in ../RUST_KERNELS_PLAN.md.
 //!
 //! Conventions shared with the Python side, and never to be re-derived here:
 //!   * the classical energy is E = 1/2 m^T H m + b^T m with H the (3N x 3N)
@@ -24,6 +26,7 @@ mod budget;
 mod classical;
 mod cpn;
 mod dimer_series;
+mod dipole_hq;
 mod kpm;
 mod lapack;
 mod scga;
@@ -101,6 +104,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     classical::register(m)?;
     cpn::register(m)?;
     dimer_series::register(m)?;
+    dipole_hq::register(m)?;
     sun_lswt::register(m)?;
     kpm::register(m)?;
     scga::register(m)?;
