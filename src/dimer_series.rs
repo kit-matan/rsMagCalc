@@ -34,14 +34,18 @@
 //!   * sectors are keyed by round(2 Sz_total), and the one-particle sectors are
 //!     visited in order of first appearance along that list (a dict's order).
 //!
-//! Threads: rayon over the clusters of one batch (`n_workers` sizes the pool);
-//! each cluster runs serially.
+//! Threads: `n_workers` scoped threads over the clusters of one batch, each
+//! cluster serial. How many run at once is set by memory, cluster by cluster
+//! (`Gate`, `budget::scratch_budget`), not by the batch's largest cluster: with
+//! the old 3 GB cap on the largest, order 8 ran on 2 threads of 128 and order 9
+//! on 1 (2026-10-31).
 use ndarray::{Array1, Array3};
-use numpy::{Complex64, IntoPyArray, PyArray1, PyArray3, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{Complex64, IntoPyArray, PyArray3, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
-use rayon::prelude::*;
+use pyo3::types::{PyDict, PyList};
+use std::sync::{Condvar, Mutex};
 
-use crate::sun_lswt::{capped_pool, perr};
+use crate::sun_lswt::perr;
 
 type C = Complex64;
 
@@ -395,11 +399,41 @@ impl Cluster {
         (idx / self.nloc.pow(d as u32)) % self.nloc
     }
 
-    /// Rough peak scratch of one run, for sizing the thread pool.
+    /// Peak scratch of one run, for admitting it into the pool: the Bloch
+    /// recursion's Omega_k and V Omega_k, (2 order + 3) complex (rows x p)
+    /// blocks on the largest sector, plus 10 % and the per-state index arrays.
+    /// Measured against peak RSS (2026-10-31, chains of m = 7-9 dimers at order
+    /// m - 1): 0.92-1.07 of the bare blocks without sectors, 0.78 with them.
+    /// Until then a sectored cluster was charged dims/2 rows, 2.7x its largest
+    /// sector at m = 9.
     fn scratch_bytes(&self, order: usize) -> usize {
         let p = self.m * (self.nloc - 1);
-        let rows = if self.sz.is_some() { self.dims() / 2 + 1 } else { self.dims() };
-        rows * p * 16 * (2 * order + 3)
+        let rows = self.largest_sector();
+        rows * p * 16 * (2 * order + 3) / 10 * 11 + self.dims() * 32
+    }
+
+    /// The size of the largest total-Sz sector (the whole space without
+    /// sectors), by convolving the nodes' level counts per round(2 Sz).
+    fn largest_sector(&self) -> usize {
+        let Some(sz) = &self.sz else { return self.dims() };
+        let keys: Vec<i64> = sz.iter().map(|x| (x * 2.0).round() as i64).collect();
+        let lo: i64 = keys.chunks(self.nloc).map(|c| *c.iter().min().unwrap()).sum();
+        let hi: i64 = keys.chunks(self.nloc).map(|c| *c.iter().max().unwrap()).sum();
+        let mut hist = vec![0usize; (hi - lo + 1) as usize];
+        let mut cur: Vec<(i64, usize)> = vec![(0, 1)];
+        for c in keys.chunks(self.nloc) {
+            let mut next: std::collections::BTreeMap<i64, usize> = Default::default();
+            for &(k, n) in &cur {
+                for &d in c {
+                    *next.entry(k + d).or_default() += n;
+                }
+            }
+            cur = next.into_iter().collect();
+        }
+        for (k, n) in cur {
+            hist[(k - lo) as usize] = n;
+        }
+        hist.into_iter().max().unwrap_or(1)
     }
 
     /// The sparse V restricted to the states `sel` (sorted global indices);
@@ -634,28 +668,160 @@ fn cluster_from(c: &ClusterIn<'_>) -> PyResult<Cluster> {
     Ok(Cluster { levels: lv.iter().copied().collect(), m, nloc, links: out, sz })
 }
 
-/// `cluster_pt_batch(clusters, order, n_workers=None)`: pyMagCalc `_cluster_pt`
-/// for each (levels (m, nloc), [(pa, pb, V)], sz (m, nloc) | None), in parallel
-/// over the clusters. Returns [(gs_int (order+1,), delta_int (order+1, p, p))].
+/// Admits clusters into the pool by their own scratch, largest first: a worker
+/// takes the next cluster only when its bytes fit beside those in flight, and
+/// one larger than the whole budget runs alone. Strictly in order, so a large
+/// cluster is never overtaken (and starved) by the small ones behind it.
+struct Gate {
+    budget: usize,
+    sizes: Vec<usize>,
+    st: Mutex<GateState>,
+    cv: Condvar,
+}
+
+#[derive(Default)]
+struct GateState {
+    next: usize,
+    bytes: usize,
+    running: usize,
+    peak_bytes: usize,
+    peak_running: usize,
+}
+
+impl Gate {
+    /// The next position in the admission order and its charge, or None when done.
+    fn take(&self) -> Option<(usize, usize)> {
+        let mut s = self.st.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if s.next >= self.sizes.len() {
+                return None;
+            }
+            let b = self.sizes[s.next].min(self.budget);
+            if s.bytes + b <= self.budget {
+                let pos = s.next;
+                s.next += 1;
+                s.bytes += b;
+                s.running += 1;
+                s.peak_bytes = s.peak_bytes.max(s.bytes);
+                s.peak_running = s.peak_running.max(s.running);
+                return Some((pos, b));
+            }
+            s = self.cv.wait(s).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    fn give_back(&self, b: usize) {
+        let mut s = self.st.lock().unwrap_or_else(|e| e.into_inner());
+        s.bytes -= b;
+        s.running -= 1;
+        self.cv.notify_all();
+    }
+}
+
+/// Returns a cluster's bytes to the gate even if its PT panics, so the other
+/// workers cannot wait on them forever.
+struct Charge<'a>(&'a Gate, usize);
+
+impl Drop for Charge<'_> {
+    fn drop(&mut self) {
+        self.0.give_back(self.1);
+    }
+}
+
+type PtOut = Result<(Vec<f64>, Vec<C>), String>;
+
+struct PoolStats {
+    threads: usize,
+    budget: usize,
+    source: String,
+    peak_bytes: usize,
+    peak_running: usize,
+    max_scratch: usize,
+}
+
+fn run_gated(cl: &[Cluster], order: usize, threads: usize, budget: usize, source: String)
+             -> (Vec<PtOut>, PoolStats) {
+    let sizes: Vec<usize> = cl.iter().map(|c| c.scratch_bytes(order)).collect();
+    let mut by_size: Vec<usize> = (0..cl.len()).collect();
+    by_size.sort_by(|&a, &b| sizes[b].cmp(&sizes[a]).then(a.cmp(&b)));
+    let gate = Gate {
+        budget,
+        sizes: by_size.iter().map(|&i| sizes[i]).collect(),
+        st: Mutex::new(GateState::default()),
+        cv: Condvar::new(),
+    };
+    let threads = threads.clamp(1, cl.len().max(1));
+    let mut out: Vec<Option<PtOut>> = (0..cl.len()).map(|_| None).collect();
+    std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..threads)
+            .map(|_| sc.spawn(|| {
+                let mut mine = Vec::new();
+                while let Some((pos, b)) = gate.take() {
+                    let _charge = Charge(&gate, b);
+                    let i = by_size[pos];
+                    mine.push((i, cl[i].pt(order)));
+                }
+                mine
+            }))
+            .collect();
+        for h in hs {
+            match h.join() {
+                Ok(mine) => mine.into_iter().for_each(|(i, r)| out[i] = Some(r)),
+                Err(p) => std::panic::resume_unwind(p),
+            }
+        }
+    });
+    let s = gate.st.into_inner().unwrap_or_else(|e| e.into_inner());
+    let stats = PoolStats {
+        threads,
+        budget,
+        source,
+        peak_bytes: s.peak_bytes,
+        peak_running: s.peak_running,
+        max_scratch: sizes.iter().copied().max().unwrap_or(0),
+    };
+    (out.into_iter().map(|r| r.expect("every cluster is taken once")).collect(), stats)
+}
+
+/// `cluster_pt_batch(clusters, order, n_workers=None, scratch_budget_gb=None,
+/// return_stats=False)`: pyMagCalc `_cluster_pt` for each (levels (m, nloc),
+/// [(pa, pb, V)], sz (m, nloc) | None), in parallel over the clusters. Returns
+/// [(gs_int (order+1,), delta_int (order+1, p, p))], and with `return_stats`
+/// (that list, {threads, peak_concurrent, budget_bytes, budget_source,
+/// peak_bytes, max_scratch_bytes, n_clusters}).
+///
+/// `n_workers` threads (default: rayon's count, i.e. the cores) run the batch;
+/// how many run AT ONCE is set by memory: each cluster is charged its own
+/// `scratch_bytes`, against the budget of `budget::scratch_budget`.
 #[pyfunction]
-#[pyo3(signature = (clusters, order, n_workers=None))]
+#[pyo3(signature = (clusters, order, n_workers=None, scratch_budget_gb=None, return_stats=false))]
 fn cluster_pt_batch<'py>(py: Python<'py>, clusters: Vec<ClusterIn<'py>>, order: usize,
-                         n_workers: Option<usize>)
-                         -> PyResult<Vec<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray3<C>>)>> {
+                         n_workers: Option<usize>, scratch_budget_gb: Option<f64>,
+                         return_stats: bool) -> PyResult<Bound<'py, PyAny>> {
     let cl = clusters.iter().map(cluster_from).collect::<PyResult<Vec<_>>>()?;
-    let per = cl.iter().map(|c| c.scratch_bytes(order)).max().unwrap_or(1);
-    let res = py.detach(|| capped_pool(n_workers, per, || {
-        cl.par_iter().map(|c| c.pt(order)).collect::<Vec<_>>()
-    }))?;
-    let mut out = Vec::with_capacity(res.len());
+    let (budget, source) = crate::budget::scratch_budget(scratch_budget_gb).map_err(perr)?;
+    let threads = n_workers.filter(|&k| k > 0).unwrap_or_else(rayon::current_num_threads);
+    let (res, st) = py.detach(|| run_gated(&cl, order, threads, budget, source));
+    let out = PyList::empty(py);
     for (c, r) in cl.iter().zip(res) {
         let (gs, delta) = r.map_err(perr)?;
         let p = c.m * (c.nloc - 1);
-        out.push((Array1::from_vec(gs).into_pyarray(py),
-                  Array3::from_shape_vec((order + 1, p, p), delta)
-                      .map_err(|e| perr(e.to_string()))?.into_pyarray(py)));
+        out.append((Array1::from_vec(gs).into_pyarray(py),
+                    Array3::from_shape_vec((order + 1, p, p), delta)
+                        .map_err(|e| perr(e.to_string()))?.into_pyarray(py)))?;
     }
-    Ok(out)
+    if !return_stats {
+        return Ok(out.into_any());
+    }
+    let d = PyDict::new(py);
+    d.set_item("threads", st.threads)?;
+    d.set_item("peak_concurrent", st.peak_running)?;
+    d.set_item("budget_bytes", st.budget)?;
+    d.set_item("budget_source", st.source)?;
+    d.set_item("peak_bytes", st.peak_bytes)?;
+    d.set_item("max_scratch_bytes", st.max_scratch)?;
+    d.set_item("n_clusters", cl.len())?;
+    Ok((out, d).into_pyobject(py)?.into_any())
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {

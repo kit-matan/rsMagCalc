@@ -296,10 +296,12 @@ impl SunModel {
 }
 
 /// Run `f` over `nq` items with rayon, capping the pool so that at most
-/// `budget / per_item` tasks run at once (the per-q matrices are large).
+/// `budget / per_item` tasks run at once (the per-q matrices are large). The
+/// budget is `budget::scratch_budget` (RSMAGCALC_SCRATCH_GB, else half the
+/// available memory, else 3 GB).
 pub(crate) fn capped_pool<T: Send>(n_workers: Option<usize>, per_item_bytes: usize,
                         f: impl FnOnce() -> T + Send) -> PyResult<T> {
-    let budget: usize = 3 << 30; // 3 GB of scratch in flight
+    let (budget, _src) = crate::budget::scratch_budget(None).map_err(perr)?;
     let cap = (budget / per_item_bytes.max(1)).max(1);
     let threads = n_workers.filter(|&k| k > 0).unwrap_or_else(rayon::current_num_threads);
     let k = threads.min(cap);

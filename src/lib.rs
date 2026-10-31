@@ -20,6 +20,7 @@
 //!   * the classical energy is E = 1/2 m^T H m + b^T m with H the (3N x 3N)
 //!     symmetric Hessian of `thermal_mc.build_supercell` and b the Zeeman term;
 //!   * m is (N, 3) row-major, flattened exactly as NumPy's `ravel()` does.
+mod budget;
 mod classical;
 mod cpn;
 mod dimer_series;
@@ -96,6 +97,7 @@ fn classical_energy(
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_info, m)?)?;
     m.add_function(wrap_pyfunction!(classical_energy, m)?)?;
+    budget::register(m)?;
     classical::register(m)?;
     cpn::register(m)?;
     dimer_series::register(m)?;

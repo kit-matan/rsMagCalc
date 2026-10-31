@@ -19,7 +19,7 @@ __all__ = ["backend", "build_info", "describe", "classical_energy",
            "langevin", "wang_landau", "sampled_trajectories", "CpnModel",
            "SunModel", "NotPositiveDefinite", "kpm_start_vector", "kpm_moments",
            "spectral_bound", "ScgaModel", "block_effective_series",
-           "cluster_pt_batch"]
+           "cluster_pt_batch", "scratch_budget"]
 
 try:
     from . import _core
@@ -754,7 +754,8 @@ def block_effective_series(E0, V_list, P_idx, order):
     return list(H)
 
 
-def cluster_pt_batch(clusters, order, n_workers=None):
+def cluster_pt_batch(clusters, order, n_workers=None, scratch_budget_gb=None,
+                     return_stats=False):
     """pyMagCalc `sun.dimer_series._cluster_pt` for many clusters, in parallel.
 
     `clusters`: iterable of (levels_list, links_local, sz_list) exactly as
@@ -762,6 +763,13 @@ def cluster_pt_batch(clusters, order, n_workers=None):
     [(pa, pb, V (nloc^2, nloc^2))] with V on the index sa*nloc + sb of node pa
     first, and per-node level Sz (nloc,) or None. Returns [(gs_int (order+1,),
     delta_int (order+1, p, p))] in the same order.
+
+    `n_workers` threads (default: one per core) run the batch, and memory decides
+    how many run at once: each cluster is charged its own scratch estimate
+    against the budget of `scratch_budget(scratch_budget_gb)`, largest first.
+    With `return_stats`, returns (results, stats): `threads`, `peak_concurrent`,
+    `budget_bytes`, `budget_source`, `peak_bytes`, `max_scratch_bytes`,
+    `n_clusters`.
     """
     import numpy as np
 
@@ -774,4 +782,15 @@ def cluster_pt_batch(clusters, order, n_workers=None):
         sz = (None if sz_list is None else
               _f64(np.array([np.asarray(s, dtype=np.float64) for s in sz_list])))
         packed.append((lv, links, sz))
-    return _core.cluster_pt_batch(packed, int(order), n_workers)
+    return _core.cluster_pt_batch(packed, int(order), n_workers,
+                                  None if scratch_budget_gb is None
+                                  else float(scratch_budget_gb), bool(return_stats))
+
+
+def scratch_budget(gb=None):
+    """(bytes, source): the scratch the memory-bound kernels (SU(N) LSWT, KPM,
+    SCGA, the dimer series) may hold in flight at once. First match wins: `gb`;
+    $RSMAGCALC_SCRATCH_GB; half the memory still available (the smaller of
+    /proc/meminfo MemAvailable and every cgroup's limit minus usage); 3 GB."""
+    _need_core()
+    return tuple(_core.scratch_budget(None if gb is None else float(gb)))

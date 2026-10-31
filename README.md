@@ -184,7 +184,7 @@ shipped example under the compiled kernels: the dimer series expansion
 `block_effective_series(E0, V_list, P_idx, order)` is pyMagCalc's Bloch recursion
 with column-dependent resolvents plus the des Cloizeaux Hermitization (each V dense
 or scipy-sparse, passed as CSR), and `cluster_pt_batch(clusters, order, n_workers)`
-is `_cluster_pt` for a list of clusters, rayon over the clusters: the pair operators
+is `_cluster_pt` for a list of clusters, threaded over the clusters: the pair operators
 embedded into the nloc^m product space, the ground state and each one-particle
 total-Sz sector run separately when the local bases carry Sz, the interaction parts
 returned. The enumeration, isomorphism keys, linked-cluster subtraction and
@@ -195,3 +195,30 @@ Gram terms of S_k and M_k summed in adjoint pairs). Pinned in
 multi-order and sparse PT problems, and on the alternating chain's, Rb2Cu3SnF12's
 and random nloc = 3 clusters, with and without sectors (`pyMagCalc/GAP_STATUS.md`,
 "Rust kernels K7").
+
+### Memory decides how many items run at once
+
+The kernels whose per-item scratch is large (SU(N) LSWT, KPM and SCGA per q; the
+dimer series per cluster) run as many items at once as fit a **scratch budget**.
+`rsmagcalc.scratch_budget()` reports it as (bytes, source), and the first match wins:
+
+1. the call's own `scratch_budget_gb` (the dimer series takes one);
+2. `RSMAGCALC_SCRATCH_GB` in the environment, in GB;
+3. half the memory this process can still get: the smaller of `/proc/meminfo`'s
+   MemAvailable and the headroom (limit − usage) of every memory-limited cgroup above
+   it (v2 `memory.max`, v1 `memory.limit_in_bytes`). A Slurm job's limit is there;
+4. 3 GB, where neither file exists (macOS).
+
+Until 2026-10-31 it was a fixed 3 GB, divided by the largest item's scratch. On a
+243 GB, 128-core node that left the dimer series on 2 threads at order 8 and 1 at
+order 9, whatever `n_workers` said. SU(N) LSWT, KPM and SCGA still cap their pool at
+budget / per-q scratch, which is the same for every q of a call. The dimer series
+instead charges each cluster its own scratch, admits the clusters largest first,
+and starts the next one only when it fits beside those already running; a cluster
+larger than the whole budget runs alone. That estimate, (2·order + 3) complex
+rows × p blocks on the largest total-Sz sector, plus 10 % and the index arrays, was
+measured against peak RSS on chains of 7–9 dimers: the measured peak is 0.55–0.97 of
+it. `cluster_pt_batch(..., return_stats=True)` also returns what the pool did:
+`threads`, `peak_concurrent`, `budget_bytes`, `budget_source`, `peak_bytes`,
+`max_scratch_bytes` and `n_clusters`. The results do not depend on the budget or on
+the thread count, bit for bit (`tests/test_scratch_budget.py`).
