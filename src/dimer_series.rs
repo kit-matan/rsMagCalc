@@ -5,7 +5,8 @@
 //! Hermitization) and `_cluster_pt` (embedding the pair operators into the
 //! nloc^m product space of one cluster, and running the PT for the ground state
 //! and the one-particle states, in total-Sz sectors when the local bases allow
-//! it). The cluster enumeration, the isomorphism keys, the linked-cluster
+//! it; the one-particle block in the vacuum's own sector through the projective
+//! cluster-additive transformation, `pca_one_particle`, since 2026-10-31). The cluster enumeration, the isomorphism keys, the linked-cluster
 //! subtraction and the resummation stay in Python: they are bookkeeping, and the
 //! profile (2026-10-29, Rb2Cu3SnF12 order 5) put 85 % of the time in the PT.
 //!
@@ -170,6 +171,19 @@ fn eye(p: usize) -> Vec<C> {
 /// major, for H(lambda) = diag(e0) + sum_j V_j lambda^j and the model space p_idx.
 pub(crate) fn block_effective_series(e0: &[f64], v: &[Csr], p_idx: &[usize], order: usize)
                                      -> Result<Vec<Vec<C>>, String> {
+    let (_om, s, m) = bloch_parts(e0, v, p_idx, order)?;
+    let p = p_idx.len();
+    Ok(sandwich(&inv_sqrt_series(&s, p, order), &m, p, order))
+}
+
+/// One series of p x p row-major matrices.
+type Series = Vec<Vec<C>>;
+
+/// pyMagCalc `_bloch_parts`: the Bloch columns Omega_k (n x p, row major, Omega_0
+/// the model-space injection) and the series S_k = (Omega^+ Omega)_k and
+/// M_k = (Omega^+ H Omega)_k.
+fn bloch_parts(e0: &[f64], v: &[Csr], p_idx: &[usize], order: usize)
+               -> Result<(Series, Series, Series), String> {
     let n = e0.len();
     let p = p_idx.len();
     let mut model = vec![false; n];
@@ -307,7 +321,11 @@ pub(crate) fn block_effective_series(e0: &[f64], v: &[Csr], p_idx: &[usize], ord
         m.push(mk);
     }
 
-    // G = S^{1/2}, T = S^{-1/2} as series (all Hermitian)
+    Ok((om, s, m))
+}
+
+/// pyMagCalc `_inv_sqrt_series`: T = S^{-1/2} for S_0 = 1, through G = S^{1/2}.
+fn inv_sqrt_series(s: &[Vec<C>], p: usize, order: usize) -> Series {
     let mut g: Vec<Vec<C>> = vec![eye(p)];
     for k in 1..=order {
         let mut acc = s[k].clone();
@@ -333,7 +351,21 @@ pub(crate) fn block_effective_series(e0: &[f64], v: &[Csr], p_idx: &[usize], ord
         }
         t.push(acc);
     }
+    t
+}
 
+fn hermitize(hk: &[C], p: usize) -> Vec<C> {
+    let mut herm = vec![ZERO; p * p];
+    for i in 0..p {
+        for j in 0..p {
+            herm[i * p + j] = 0.5 * (hk[i * p + j] + hk[j * p + i].conj());
+        }
+    }
+    herm
+}
+
+/// pyMagCalc `_sandwich`: sum_{a+b+c=k} T_a M_b T_c, Hermitized.
+fn sandwich(t: &[Vec<C>], m: &[Vec<C>], p: usize, order: usize) -> Series {
     let mut heff = Vec::with_capacity(order + 1);
     for k in 0..=order {
         let mut hk = vec![ZERO; p * p];
@@ -345,15 +377,83 @@ pub(crate) fn block_effective_series(e0: &[f64], v: &[Csr], p_idx: &[usize], ord
                 }
             }
         }
-        let mut herm = vec![ZERO; p * p];
-        for i in 0..p {
-            for j in 0..p {
-                herm[i * p + j] = 0.5 * (hk[i * p + j] + hk[j * p + i].conj());
+        heff.push(hermitize(&hk, p));
+    }
+    heff
+}
+
+/// pyMagCalc `_series_mul`: (X Y)_k = sum_i X_i Y_{k-i}.
+fn series_mul(x: &[Vec<C>], y: &[Vec<C>], p: usize, order: usize) -> Series {
+    (0..=order)
+        .map(|k| {
+            let mut acc = vec![ZERO; p * p];
+            for i in 0..=k {
+                let xy = mm(&x[i], &y[k - i], p);
+                for (a, b) in acc.iter_mut().zip(&xy) {
+                    *a += *b;
+                }
+            }
+            acc
+        })
+        .collect()
+}
+
+fn adjoint(a: &[C], p: usize) -> Vec<C> {
+    let mut h = vec![ZERO; p * p];
+    for i in 0..p {
+        for j in 0..p {
+            h[j * p + i] = a[i * p + j].conj();
+        }
+    }
+    h
+}
+
+/// pyMagCalc `_pca_one_particle`: the one-particle H_eff of the projective
+/// cluster-additive transformation (Hoermann and Schmidt, SciPost Phys. 15, 097
+/// (2023), Sec. 3.1) for a model space in the vacuum's own sector. With c_k the
+/// model rows of the vacuum's Bloch column and b_k the vacuum's row of the
+/// one-particle columns, A = 1 - c b^+ and
+///   H_eff = (A S^-1 A^+)^{-1/2} A S^-1 M S^-1 A^+ (A S^-1 A^+)^{-1/2};
+/// the des Cloizeaux H_eff, which is not cluster additive once the dressed vacuum
+/// has one-particle components (out-of-plane DM, T0), when A = 1.
+fn pca_one_particle(om1: &[Vec<C>], s: &[Vec<C>], m: &[Vec<C>], om0: &[Vec<C>],
+                    vac: usize, ploc: &[usize], order: usize) -> Series {
+    let p = ploc.len();
+    let mut a: Series = vec![eye(p)];
+    for k in 1..=order {
+        let mut ak = vec![ZERO; p * p];
+        for i in 0..=k {
+            let c = &om0[i];                       // n x 1
+            let b = &om1[k - i][vac * p..(vac + 1) * p];
+            for (r, &g) in ploc.iter().enumerate() {
+                let cr = c[g];
+                if cr == ZERO {
+                    continue;
+                }
+                for (x, &bv) in ak[r * p..(r + 1) * p].iter_mut().zip(b) {
+                    *x -= cr * bv;
+                }
             }
         }
-        heff.push(herm);
+        a.push(ak);
     }
-    Ok(heff)
+    let ah: Series = a.iter().map(|x| adjoint(x, p)).collect();
+    let mut sinv: Series = vec![eye(p)];
+    for k in 1..=order {
+        let mut acc = vec![ZERO; p * p];
+        for j in 1..=k {
+            let ss = mm(&s[j], &sinv[k - j], p);
+            for (x, y) in acc.iter_mut().zip(&ss) {
+                *x -= *y;
+            }
+        }
+        sinv.push(acc);
+    }
+    let asinv = series_mul(&a, &sinv, p, order);
+    let y: Series = series_mul(&asinv, &ah, p, order).iter().map(|x| hermitize(x, p)).collect();
+    let z = series_mul(&series_mul(&asinv, m, p, order), &series_mul(&sinv, &ah, p, order),
+                       p, order);
+    sandwich(&inv_sqrt_series(&y, p, order), &z, p, order)
 }
 
 /// One link of a cluster: its node positions and pair operator, the operator's
@@ -511,7 +611,9 @@ impl Cluster {
         // the PT for the model states `model` (global indices) within their
         // sector; a sector's (local index map, E0, V) is built once
         let mut sectors: Vec<(Option<i64>, Vec<usize>, Vec<f64>, Csr)> = Vec::new();
-        let mut run = |model: &[usize]| -> Result<Vec<Vec<C>>, String> {
+        // -> (Omega, S, M, the model's local rows, the sector, the vacuum's local row)
+        type Parts = (Series, Series, Series, Vec<usize>, Option<i64>, usize);
+        let mut run = |model: &[usize]| -> Result<Parts, String> {
             let q = key.as_ref().map(|k| k[model[0]]);
             let si = match sectors.iter().position(|s| s.0 == q) {
                 Some(si) => si,
@@ -535,10 +637,12 @@ impl Cluster {
             if ploc.contains(&usize::MAX) {
                 return Err("a model state lies outside its own Sz sector".into());
             }
-            block_effective_series(e0s, std::slice::from_ref(v), &ploc, order)
+            let (om, s, mm_) = bloch_parts(e0s, std::slice::from_ref(v), &ploc, order)?;
+            Ok((om, s, mm_, ploc, q, pos[0]))
         };
 
-        let hg = run(&[0])?;
+        let (om0, s0, m0, _, q0, _) = run(&[0])?;
+        let hg = sandwich(&inv_sqrt_series(&s0, 1, order), &m0, 1, order);
         for k in 0..=order {
             gs[k] = hg[k][0].re;
         }
@@ -562,8 +666,15 @@ impl Cluster {
         };
         for cols in &groups {
             let model: Vec<usize> = cols.iter().map(|&ii| onep[ii]).collect();
-            let h = run(&model)?;
+            let (om1, s1, m1, ploc, q, vac) = run(&model)?;
             let ps = cols.len();
+            // the vacuum's own sector goes through the projective cluster-additive
+            // transformation; any other cannot mix with the vacuum
+            let h = if q == q0 {
+                pca_one_particle(&om1, &s1, &m1, &om0, vac, &ploc, order)
+            } else {
+                sandwich(&inv_sqrt_series(&s1, ps, order), &m1, ps, order)
+            };
             for k in 0..=order {
                 let dk = &mut delta[k * p * p..(k + 1) * p * p];
                 for (a, &ca) in cols.iter().enumerate() {

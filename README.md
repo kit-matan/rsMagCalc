@@ -196,6 +196,16 @@ multi-order and sparse PT problems, and on the alternating chain's, Rb2Cu3SnF12'
 and random nloc = 3 clusters, with and without sectors (`pyMagCalc/GAP_STATUS.md`,
 "Rust kernels K7").
 
+Since 2026-10-31 the one-particle block that shares its sector with the vacuum (the
+T0 states under out-of-plane DM, or every one-particle state without sectors) is no
+longer the des Cloizeaux H_eff. That H_eff is not cluster additive once the dressed
+vacuum has one-particle components. The block now goes through the projective
+cluster-additive transformation of Hörmann and Schmidt, SciPost Phys. 15, 097 (2023),
+which removes each one-particle state's vacuum component before orthonormalizing.
+The same change was made in pyMagCalc's `_cluster_pt`. The other sectors are
+unchanged bit for bit (`pyMagCalc/GAP_STATUS.md`, "The dimer series' T0 sector made
+cluster additive").
+
 ### Memory decides how many items run at once
 
 The kernels whose per-item scratch is large (SU(N) LSWT, KPM and SCGA per q; the

@@ -5,7 +5,9 @@
     (eigenvalue_series's use), p = 1, scipy-sparse input, and a model space that
     is not the lowest states;
   * `cluster_pt_batch` against `_cluster_pt` at 1e-12 relative, with and without
-    the total-Sz sectors: the alternating chain's clusters, Rb2Cu3SnF12's (6
+    the total-Sz sectors, the vacuum's own sector through the projective
+    cluster-additive transformation in both (2026-10-31; the random clusters mix the
+    vacuum with their one-particle states, so that path is compared too): the alternating chain's clusters, Rb2Cu3SnF12's (6
     dimers, out-of-plane DM, when pyMagCalc's examples are present) and random
     nloc = 3 clusters with complex Hermitian pair operators on arbitrary node
     pairs (pa > pb included), so no symmetry of the physical models hides a bug;
